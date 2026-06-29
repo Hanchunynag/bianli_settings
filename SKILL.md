@@ -1,79 +1,95 @@
-# 设置 UI 控件树采集项目 Skill
+# 设置 UI 遍历检测项目 Skill
 
 ## 项目定位
 
-本仓库用于 HarmonyOS 设置 App 的手动遍历采集、UI JSON 解析和控件树构建。
+本仓库用于 HarmonyOS 设置 App 的页面遍历、控件提取、组件截图裁剪和视觉检测准备。
 
-目标是把多次手动采集的页面合并成稳定树结构：
+程序要维护四类核心数据：
 
 ```text
-root
-  WLAN
-    Huawei-Guest
-      断开连接
-      自动重新连接
-  蓝牙
-  移动网络
+页面树：页面在哪里
+状态机：页面之间怎么跳转
+组件树：每个页面里面有什么
+视觉检测数据：组件截图和模型请求怎么生成
 ```
 
-## 文件职责
+## 当前架构
 
-必须保持两脚本结构：
-
-1. `settings_json_tree_analyzer.py`
-   - 脚本 1。
-   - AI / 离线分析使用。
-   - 输入 `current_ui_tree.json`。
-   - 不连接手机，不执行设备采集。
-   - 负责解析 JSON、提取控件、人工确认挂载分支、生成树结构文件。
-
-2. `settings_hdc_capture_runner.py`
-   - 脚本 2。
-   - 用户在 PC 端连接手机使用。
-   - 负责获取 `current_ui_tree.json` 和 `current_screen.png`。
-   - 采集完成后调用脚本 1 的 `analyze_json_file()`。
-
-3. `settings_ui_manual_recorder.py`
-   - 兼容入口。
-   - 只作为旧命令包装器。
-   - 不放核心解析逻辑。
-
-## 修改规则
-
-修改代码时必须同步维护脚本 1 和脚本 2：
-
-- JSON 解析、控件识别、树结构、隐私脱敏、人工确认逻辑，只能放在 `settings_json_tree_analyzer.py`。
-- PC 端采集逻辑，只能放在 `settings_hdc_capture_runner.py`。
-- 不要在脚本 2 中复制脚本 1 的解析逻辑。
-- 不要在脚本 1 中加入手机采集逻辑。
-- `settings_ui_manual_recorder.py` 只能保持兼容转发。
-
-## 运行命令规范
-
-PowerShell 命令不要带 `$`。
-
-PC 端连接手机采集：
+日常只从统一入口运行：
 
 ```powershell
-python D:\hanchunyang_6_3\AItest\settings_hdc_capture_runner.py
+python D:\hanchunyang_6_3\AItest\settings_tool.py <command>
 ```
 
-兼容旧入口：
+文件职责：
+
+1. `settings_tool.py`
+   - 统一命令入口。
+   - 只做命令路由，不放业务逻辑。
+
+2. `settings_ui_manual_recorder.py`
+   - 页面采集、当前 UI tree 解析、控件提取。
+   - 维护页面树、状态机、页面组件树、组件 JSONL 清单。
+   - 负责人工数字选择挂载关系和删除/清理命令。
+
+3. `settings_detection_traverser.py`
+   - 根据页面树、状态机和组件清单生成检测遍历任务。
+
+4. `settings_component_cropper.py`
+   - 根据组件 bounds 从当前截图裁剪组件小图。
+
+5. `settings_visual_review_interface.py`
+   - 生成规则检测、VLM 请求、LLM 裁决请求和初始标注数据。
+
+6. `settings_yolo_backup_detector.py`
+   - 可选 YOLO 备份检测。
+   - 支持外部检测结果 JSON，并与 UI tree 语义组件按 IoU 匹配。
+
+不要恢复旧的 `settings_json_tree_analyzer.py` / `settings_hdc_capture_runner.py` 两脚本结构。
+
+## 常用命令
+
+采集或解析当前页面：
 
 ```powershell
-python D:\hanchunyang_6_3\AItest\settings_ui_manual_recorder.py
+python D:\hanchunyang_6_3\AItest\settings_tool.py record
+python D:\hanchunyang_6_3\AItest\settings_tool.py record --skip-capture
 ```
 
-AI / 离线 JSON 分析：
+生成检测遍历任务：
 
 ```powershell
-python D:\hanchunyang_6_3\AItest\settings_json_tree_analyzer.py --json D:\hanchunyang_6_3\AItest\outputs\latest\current_ui_tree.json
+python D:\hanchunyang_6_3\AItest\settings_tool.py traverse
+python D:\hanchunyang_6_3\AItest\settings_tool.py traverse --run
 ```
 
-清空旧树重新记录：
+组件截图裁剪：
 
 ```powershell
-python D:\hanchunyang_6_3\AItest\settings_hdc_capture_runner.py --reset
+python D:\hanchunyang_6_3\AItest\settings_tool.py crop --page-id "title::流量管理"
+```
+
+视觉检测请求准备：
+
+```powershell
+python D:\hanchunyang_6_3\AItest\settings_tool.py visual-prepare --vlm-all
+```
+
+状态机维护：
+
+```powershell
+python D:\hanchunyang_6_3\AItest\settings_tool.py sm-prune
+python D:\hanchunyang_6_3\AItest\settings_tool.py sm-reset
+python D:\hanchunyang_6_3\AItest\settings_tool.py sm-delete-state root/WLAN
+python D:\hanchunyang_6_3\AItest\settings_tool.py sm-delete-transition <transition_id>
+```
+
+页面树维护：
+
+```powershell
+python D:\hanchunyang_6_3\AItest\settings_tool.py tree-delete 7.3
+python D:\hanchunyang_6_3\AItest\settings_tool.py tree-clear 7.3
+python D:\hanchunyang_6_3\AItest\settings_tool.py tree-reset
 ```
 
 ## 交互规则
@@ -93,29 +109,34 @@ python D:\hanchunyang_6_3\AItest\settings_hdc_capture_runner.py --reset
 - 不在 txt/json/终端中展示 key。
 - 不在 txt/json/终端中展示 value。
 - `locator` 改为 `bounds_center`。
-- 保留 `text/name`，否则用户无法在候选列表里选择分支。
+- 可保留非敏感的 text/name，否则用户无法选择候选分支。
 
 不能仅凭 `value=加密` 判断隐私，因为 WLAN 未连接状态、已保存状态、开放状态都可能对应敏感网络条目。
 
 ## 输出文件
 
-每次运行后应更新：
+每次 `record` 后应更新：
 
 ```text
 outputs/graph/settings_ui_graph_readable.txt
 outputs/graph/settings_tree.json
 outputs/graph/settings_nodes_index.json
+outputs/graph/settings_state_machine.json
+outputs/graph/settings_page_component_tree.json
+outputs/graph/settings_page_components.jsonl
+outputs/graph/settings_components_report.md
 ```
 
-脚本 1 还应更新当前页摘要：
+其中：
 
-```text
-outputs/latest/ui_semantic_summary.txt
-```
+- `settings_tree.json`：页面树。
+- `settings_state_machine.json`：跳转状态机。
+- `settings_page_component_tree.json`：页面内部组件结构。
+- `settings_page_components.jsonl`：逐组件事实库，供遍历、裁剪、视觉检测使用。
 
 ## 设计原则
 
-- 保持最小可用骨架，不逐个页面写死适配规则。
-- 不恢复 WLAN、蓝牙、WiFi 详情页的自动挂载 if/else。
+- 优先维护统一入口，避免让用户记多个脚本。
+- 不逐个页面写死适配规则。
 - 动态页面父子关系靠人工选择，而不是程序猜测。
-- 解析逻辑可增强，但必须先保证树结构可控、可解释、可人工修正。
+- 解析逻辑可增强，但必须保证树结构、状态机、组件树可解释、可删除、可重建。

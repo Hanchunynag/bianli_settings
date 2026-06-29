@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+outputs/
+current_ui_tree.json
+current_ui_tree_pretty.json
+current_screen.png
+
+*.log
+.DS_Store
