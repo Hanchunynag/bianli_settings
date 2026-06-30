@@ -31,6 +31,27 @@ COMMANDS: Dict[str, Dict[str, object]] = {
         "prefix": [],
         "desc": "采集/解析当前页面，更新页面树、状态机、组件库",
     },
+    "nav-record": {
+        "script": "settings_ui_manual_recorder.py",
+        "prefix": ["--nav-record"],
+        "desc": "录制轻量导航状态图：候选入口、pending transition、横向滑动",
+    },
+    "nav-pending-clear": {
+        "script": "settings_ui_manual_recorder.py",
+        "prefix": ["--nav-pending-clear"],
+        "desc": "清除未完成的导航 transition",
+    },
+    "nav-graph-show": {
+        "script": "settings_ui_manual_recorder.py",
+        "prefix": ["--nav-graph-show"],
+        "desc": "显示轻量导航状态图 JSON",
+    },
+    "nav-path": {
+        "script": "settings_ui_manual_recorder.py",
+        "prefix": [],
+        "desc": "从导航状态图 BFS 生成轻量 path_snapshot（--to Pages_xxx）",
+        "nav_path": True,
+    },
     "traverse": {
         "script": "settings_detection_traverser.py",
         "prefix": [],
@@ -132,6 +153,10 @@ def print_help() -> None:
     print("常用命令:")
     for name in [
         "record",
+        "nav-record",
+        "nav-path",
+        "nav-graph-show",
+        "nav-pending-clear",
         "traverse",
         "crop",
         "visual-prepare",
@@ -146,6 +171,8 @@ def print_help() -> None:
     print("")
     print("示例:")
     print("  python settings_tool.py record --skip-capture")
+    print("  python settings_tool.py nav-record")
+    print("  python settings_tool.py nav-path --to Pages_data_usage --description \"流量管理\"")
     print("  python settings_tool.py traverse --run")
     print("  python settings_tool.py crop --page-id \"title::流量管理\"")
     print("  python settings_tool.py visual-prepare --vlm-all")
@@ -167,6 +194,21 @@ def split_value_and_passthrough(rest: List[str]) -> List[str]:
 
 def build_args(command: str, rest: List[str]) -> List[str]:
     spec = COMMANDS[command]
+    if spec.get("nav_path"):
+        out: List[str] = []
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--to":
+                if i + 1 >= len(rest):
+                    raise SystemExit("nav-path 需要 --to Pages_xxx")
+                out += ["--nav-path-to", rest[i + 1]]
+                i += 2
+            else:
+                out.append(rest[i])
+                i += 1
+        if "--nav-path-to" not in out:
+            raise SystemExit("nav-path 需要 --to Pages_xxx")
+        return out
     prefix = list(spec.get("prefix", []))
     if spec.get("takes_value"):
         return prefix + split_value_and_passthrough(rest)

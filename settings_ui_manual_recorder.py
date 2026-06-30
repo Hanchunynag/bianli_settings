@@ -34,6 +34,9 @@ Node = Dict[str, Any]
 
 DEFAULT_DEVICE_ID = "68Q0223918000004"
 DEFAULT_WORK_DIR = Path(r"D:\hanchunyang_6_3\AItest")
+PACKAGE_NAME = "com.huawei.hmos.settings"
+MAIN_PAGE_NAME = "com.huawei.hmos.settings.MainAbility"
+LIGHT_PATH_KEYS = ["type", "operate", "value", "key_description", "step_prompt", "scope", "expect", "axis"]
 NOISE_TEXTS = {"tab_unlock"}
 PRIVACY_VALUE_TEXTS = {"加密"}
 SENSITIVE_KEY_DISPLAY = "(敏感 key 已隐藏)"
@@ -218,6 +221,212 @@ def capture_artifacts(device_id: str, output_dir: Path) -> bool:
                 print(f"✗ 生成格式化 UI 树 JSON 失败: {e}")
                 return False
     return True
+
+
+# ============================================================
+# 轻量导航状态图 / 路径录制
+# ============================================================
+
+def navigation_dir(work_dir: Path) -> Path:
+    return work_dir / "outputs" / "navigation"
+
+
+def navigation_graph_path(work_dir: Path) -> Path:
+    return navigation_dir(work_dir) / "settings_navigation_graph.json"
+
+
+def pending_transition_path(work_dir: Path) -> Path:
+    return navigation_dir(work_dir) / "current_pending_transition.json"
+
+
+def path_cases_path(work_dir: Path) -> Path:
+    return navigation_dir(work_dir) / "settings_path_cases.json"
+
+
+def empty_navigation_graph() -> Dict[str, Any]:
+    return {
+        "package_name": PACKAGE_NAME,
+        "main_page_name": MAIN_PAGE_NAME,
+        "updated_at": now_iso(),
+        "states": {},
+        "transitions": [],
+    }
+
+
+def load_navigation_graph(work_dir: Path) -> Dict[str, Any]:
+    path = navigation_graph_path(work_dir)
+    if path.exists():
+        graph = load_json(path)
+        graph.setdefault("package_name", PACKAGE_NAME)
+        graph.setdefault("main_page_name", MAIN_PAGE_NAME)
+        graph.setdefault("states", {})
+        graph.setdefault("transitions", [])
+        return graph
+    return empty_navigation_graph()
+
+
+def save_navigation_graph(graph: Dict[str, Any], work_dir: Path) -> None:
+    graph["updated_at"] = now_iso()
+    save_json(graph, navigation_graph_path(work_dir), "轻量导航状态图")
+
+
+def is_stable_key(key: Any) -> bool:
+    text = str(key or "").strip()
+    if not text or "*" in text or "AvailableDeviceGroup" in text:
+        return False
+    if re.search(r"\d{8,}", text):
+        return False
+    if re.fullmatch(r"[0-9a-fA-F\-]{16,}", text):
+        return False
+    return True
+
+
+def is_stable_text(text: Any) -> bool:
+    value = clean_label(str(text or ""))
+    if not value:
+        return False
+    if value in {"WLAN", "蓝牙", "移动网络", "隐私和安全", "流量管理"}:
+        return True
+    if re.fullmatch(r"\d+(\.\d+)?", value):
+        return False
+    if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", value):
+        return False
+    if re.fullmatch(r"[\d.]+\s*(KB|MB|GB|TB|B|K|M|G)(/s)?", value, flags=re.I):
+        return False
+    if len(value) >= 24 and re.fullmatch(r"[0-9A-Za-z_\-]+", value):
+        return False
+    return True
+
+
+def detect_dialog_root(root: Node) -> Optional[Node]:
+    candidates = find_all(
+        root,
+        lambda n: is_visible(n) and any(word in get_type(n).lower() for word in ["dialog", "popup"])
+    )
+    if not candidates:
+        candidates = find_all(root, lambda n: is_visible(n) and any(word in get_key(n).lower() for word in ["dialog", "popup"]))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda n: parse_rect(get_attr(n, "bounds"))["area"])
+
+
+def state_name_from_title(title: str, overlay: bool = False) -> str:
+    title = clean_label(title)
+    prefix = "Overlay" if overlay else "Pages"
+    if title == "设置":
+        return "Pages_root"
+    segment = tree_segment(title)
+    if not segment:
+        digest = hashlib.sha1(title.encode("utf-8", errors="ignore")).hexdigest()[:8]
+        segment = f"unknown_{digest}"
+    return f"{prefix}_{segment}"
+
+
+def build_navigation_state(root: Node) -> Dict[str, Any]:
+    page = page_identity(root)
+    dialog_root = detect_dialog_root(root)
+    scope_root = dialog_root or root
+    title = page.get("title") or (nearest_label(scope_root) if dialog_root else "")
+    page_name = state_name_from_title(title or page.get("page_id", "page"), overlay=bool(dialog_root))
+    texts = [t for t in meaningful_texts(scope_root) if is_stable_text(t)][:8]
+    return {
+        "page_name": page_name,
+        "page_description": ("弹窗：" if dialog_root else "") + (title or page_name),
+        "last_title": title,
+        "signature": {
+            "title": title,
+            "texts_any": texts,
+        },
+    }
+
+
+def target_from_node(node: Node, dialog: bool = False) -> Dict[str, Any]:
+    text = next((t for t in meaningful_texts(node) if is_stable_text(t)), "")
+    key = get_key(node)
+    label = text or nearest_label(node)
+    rect = parse_rect(get_attr(node, "bounds"))
+    if text:
+        target = {"type": "text", "value": text, "key_description": text, "step_prompt": text}
+    elif is_stable_key(key):
+        desc = label or key
+        target = {"type": "key", "value": key, "key_description": desc, "step_prompt": desc}
+    else:
+        desc = label or "未命名控件"
+        target = {"type": "bounds", "value": rect["center"], "key_description": desc, "step_prompt": "点击指定位置" if not label else desc}
+    if dialog:
+        target["scope"] = "dialog"
+    return target
+
+
+def extract_navigation_candidates(root_json: Node) -> List[Dict[str, Any]]:
+    dialog_root = detect_dialog_root(root_json)
+    scope_root = dialog_root or find_content_root(root_json)
+    candidates: List[Dict[str, Any]] = []
+    preferred = {"Row", "ListItem", "Button", "Column"}
+
+    def valid(n: Node) -> bool:
+        if not (to_bool(attrs(n).get("clickable", False)) and is_visible(n) and is_enabled(n)):
+            return False
+        if get_type(n) not in preferred:
+            return False
+        if has_sensitive_key_in_subtree(n) or not is_stable_key(get_key(n)) and not any(is_stable_text(t) for t in meaningful_texts(n)):
+            # 没有稳定 text/key 时仍允许 bounds 兜底，但动态敏感项必须排除。
+            if has_sensitive_key_in_subtree(n):
+                return False
+        label = nearest_label(n) or get_text(n)
+        if label in {"返回", "返回按钮"}:
+            return False
+        rect = parse_rect(get_attr(n, "bounds"))
+        return rect["valid"] and rect["area"] > 0
+
+    seen = set()
+    nodes = find_all(scope_root, valid)
+    nodes.sort(key=lambda n: (parse_rect(get_attr(n, "bounds"))["top"], parse_rect(get_attr(n, "bounds"))["left"]))
+    for n in nodes:
+        rect = parse_rect(get_attr(n, "bounds"))
+        target = target_from_node(n, dialog=bool(dialog_root))
+        sig = json.dumps([target.get("type"), target.get("value"), rect["center"]], ensure_ascii=False)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        candidates.append({
+            "index": len(candidates) + 1,
+            "text": next((t for t in meaningful_texts(n) if is_stable_text(t)), ""),
+            "key": get_key(n) if is_stable_key(get_key(n)) else "",
+            "type": get_type(n),
+            "bounds": get_attr(n, "bounds"),
+            "bounds_center": rect["center"],
+            "suggested_target": target,
+        })
+    return candidates
+
+
+def transition_id(from_page: str, operate: str, to_page: str) -> str:
+    return f"{from_page}__{operate}__{to_page}"
+
+
+def add_transition(graph: Dict[str, Any], transition: Dict[str, Any]) -> None:
+    tid = transition.get("transition_id")
+    graph["transitions"] = [t for t in graph.get("transitions", []) if t.get("transition_id") != tid]
+    graph.setdefault("transitions", []).append(transition)
+
+
+def light_step_from_transition(t: Dict[str, Any]) -> Dict[str, Any]:
+    target = dict(t.get("target") or {})
+    target["operate"] = t.get("operate", target.get("operate", "tap"))
+    return {k: target[k] for k in LIGHT_PATH_KEYS if k in target}
+
+
+def horizontal_target(direction: str) -> Dict[str, Any]:
+    left = direction == "left"
+    return {
+        "type": "special",
+        "value": "横向列表向左滑动一次" if left else "横向列表向右滑动一次",
+        "key_description": "横向列表",
+        "step_prompt": "在横向列表中向左滑动一次" if left else "在横向列表中向右滑动一次",
+        "axis": "horizontal",
+        "scope": "local_container",
+    }
 
 
 # ============================================================
@@ -2578,7 +2787,174 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sm-prune", action="store_true", help="清理状态机孤儿 verify/signature 和页面中的失效引用")
     p.add_argument("--parent-node-id", default="", help="非交互模式：直接指定当前页面挂载到哪个节点下面")
     p.add_argument("--no-prompt", action="store_true", help="不弹出数字选择，直接继续记录当前 active_node_id")
+    p.add_argument("--nav-record", action="store_true", help="轻量导航状态图录制模式")
+    p.add_argument("--nav-pending-clear", action="store_true", help="清除未完成的导航 transition")
+    p.add_argument("--nav-graph-show", action="store_true", help="显示轻量导航状态图摘要")
+    p.add_argument("--nav-path-to", default="", help="从导航图 BFS 生成到目标页面的轻量 path_snapshot")
+    p.add_argument("--description", default="", help="nav-path 输出的页面描述")
     return p.parse_args()
+
+
+def print_nav_graph(work_dir: Path) -> None:
+    graph = load_navigation_graph(work_dir)
+    print(json.dumps(graph, ensure_ascii=False, indent=2))
+
+
+def clear_pending_transition(work_dir: Path) -> None:
+    path = pending_transition_path(work_dir)
+    if path.exists():
+        path.unlink()
+        print(f"✓ 已删除未完成转移: {path}")
+    else:
+        print(f"✓ 当前没有未完成转移: {path}")
+
+
+def prompt_special_target() -> Tuple[str, Dict[str, Any], Optional[str]]:
+    operate = input("operate（默认 tap）: ").strip() or "tap"
+    value = input("value: ").strip()
+    desc = input("key_description: ").strip() or value or "特殊控件"
+    prompt = input("step_prompt: ").strip() or desc
+    scope = input("scope（可空/page/dialog/local_container）: ").strip()
+    expect = input("expect（可空/dialog/same_page/new_page/list_changed）: ").strip()
+    effect = input("effect（可空/dialog）: ").strip()
+    target = {"type": "special", "value": value, "key_description": desc, "step_prompt": prompt}
+    if scope:
+        target["scope"] = scope
+    if expect:
+        target["expect"] = expect
+    return operate, target, effect or None
+
+
+def complete_pending_if_needed(work_dir: Path, graph: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    path = pending_transition_path(work_dir)
+    if not path.exists():
+        return False
+    pending = load_json(path)
+    print("\n当前存在未完成转移：")
+    print(f"from_page={pending.get('from_page')}")
+    print(f"target={(pending.get('target') or {}).get('step_prompt') or (pending.get('target') or {}).get('value')}")
+    print(f"当前 dump 页面识别为 {state.get('page_name')}")
+    choice = input("是否将其补全为 transition？[y/n]: ").strip().lower()
+    if choice == "y":
+        transition = {
+            "transition_id": transition_id(pending["from_page"], pending.get("operate", "tap"), state["page_name"]),
+            "from_page": pending["from_page"],
+            "to_page": state["page_name"],
+            "operate": pending.get("operate", "tap"),
+            "target": pending.get("target", {}),
+        }
+        if pending.get("effect"):
+            transition["effect"] = pending["effect"]
+        add_transition(graph, transition)
+        save_navigation_graph(graph, work_dir)
+        path.unlink()
+        print("✓ 已补全 transition 并清空 pending")
+        return True
+    delete = input("是否删除当前 pending？[y/n]: ").strip().lower()
+    if delete == "y":
+        path.unlink()
+        print("✓ 已删除 pending")
+    else:
+        print("✓ 已保留 pending")
+    return False
+
+
+def run_nav_record(args: argparse.Namespace, work_dir: Path, output_dir: Path) -> None:
+    if not args.skip_capture:
+        if not capture_artifacts(args.device_id, output_dir):
+            return
+    else:
+        print("已跳过 hdc 采集，仅解析已有 JSON")
+    json_path = Path(args.json) if args.json else output_dir / "current_ui_tree.json"
+    if not json_path.exists():
+        print(f"✗ JSON 文件不存在: {json_path}")
+        return
+    raw_root = load_json(json_path)
+    root_json = load_json(json_path)
+    annotate(root_json)
+    state = build_navigation_state(root_json)
+    graph = load_navigation_graph(work_dir)
+    graph.setdefault("states", {})[state["page_name"]] = state
+    save_navigation_graph(graph, work_dir)
+    complete_pending_if_needed(work_dir, graph, state)
+
+    candidates = extract_navigation_candidates(root_json)
+    print("\n当前页面状态")
+    print(f"page_name={state['page_name']}  title={state.get('last_title')}")
+    print("\n候选入口（普通上下滚动不会记录；hl/hr 会记录横向局部滑动）")
+    for c in candidates:
+        print(f"{c['index']}. [{c.get('type')}] text=\"{c.get('text')}\" key={c.get('key') or '(无 key)'} center={c.get('bounds_center')}")
+    print("hl. 局部横向向左滑动")
+    print("hr. 局部横向向右滑动")
+    print("s. 手动添加 special")
+    choice = input("请选择候选编号/hl/hr/s（回车退出）: ").strip()
+    if not choice:
+        return
+    effect = None
+    if choice in {"hl", "hr"}:
+        operate = "swipe_left" if choice == "hl" else "swipe_right"
+        target = horizontal_target("left" if choice == "hl" else "right")
+        trans = {
+            "transition_id": transition_id(state["page_name"], operate, state["page_name"]),
+            "from_page": state["page_name"],
+            "to_page": state["page_name"],
+            "operate": operate,
+            "target": target,
+            "effect": "local_horizontal_view_changed",
+        }
+        add_transition(graph, trans)
+        save_navigation_graph(graph, work_dir)
+        print("✓ 已记录横向滑动 transition（from_page == to_page）")
+        return
+    if choice == "s":
+        operate, target, effect = prompt_special_target()
+    else:
+        try:
+            selected = candidates[int(choice) - 1]
+        except Exception:
+            print("✗ 无效选择")
+            return
+        operate = "tap"
+        target = selected["suggested_target"]
+        effect = input("effect（可空/dialog）: ").strip() or None
+        expect = input("expect（可空/dialog/same_page/new_page/list_changed）: ").strip()
+        if expect:
+            target["expect"] = expect
+    pending = {"from_page": state["page_name"], "operate": operate, "target": target, "created_at": now_iso()}
+    if effect:
+        pending["effect"] = effect
+    save_json(pending, pending_transition_path(work_dir), "未完成导航转移")
+    _ = raw_root  # 保持 raw dump 与 pretty JSON 只由 capture_artifacts 负责生成，不使用 annotate 后内容覆盖。
+    print("请在设备上手动执行该动作进入目标页面后，再运行 nav-record 补全 transition。")
+
+
+def build_nav_path(work_dir: Path, to_page: str, description: str = "") -> None:
+    graph = load_navigation_graph(work_dir)
+    queue: List[Tuple[str, List[Dict[str, Any]]]] = [("Pages_root", [])]
+    seen = {"Pages_root"}
+    while queue:
+        page, path = queue.pop(0)
+        if page == to_page:
+            result = {
+                "package_name": graph.get("package_name", PACKAGE_NAME),
+                "main_page_name": graph.get("main_page_name", MAIN_PAGE_NAME),
+                "page_description": description or graph.get("states", {}).get(to_page, {}).get("page_description", to_page),
+                "path_snapshot": path,
+            }
+            save_json(result, path_cases_path(work_dir), "轻量路径用例")
+            return
+        for t in graph.get("transitions", []):
+            if t.get("from_page") != page:
+                continue
+            nxt = t.get("to_page")
+            step = light_step_from_transition(t)
+            # 普通纵向 scroll 永不写入 path_snapshot；目前录制器也不会生成该动作。
+            if step.get("operate") == "scroll" and step.get("axis") != "horizontal":
+                continue
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append((nxt, path + [step]))
+    print(f"✗ 未找到从 Pages_root 到 {to_page} 的路径")
 
 
 def main() -> None:
@@ -2595,6 +2971,19 @@ def main() -> None:
     print(f"工作目录: {work_dir}")
     print(f"输出目录: {output_dir}")
     print(f"图谱目录: {graph_dir}")
+
+    if args.nav_pending_clear:
+        clear_pending_transition(work_dir)
+        return
+    if args.nav_graph_show:
+        print_nav_graph(work_dir)
+        return
+    if args.nav_path_to:
+        build_nav_path(work_dir, args.nav_path_to, args.description)
+        return
+    if args.nav_record:
+        run_nav_record(args, work_dir, output_dir)
+        return
 
     if args.reset == "__ALL__" and graph_dir.exists():
         shutil.rmtree(graph_dir)
