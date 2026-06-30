@@ -6,8 +6,10 @@ HarmonyOS 设置页面遍历、控件提取和视觉检测准备工具。
 
 优先使用统一入口：
 
-```bash
+```powershell
 python settings_tool.py record
+python settings_tool.py nav-record
+python settings_tool.py nav-path --to Pages_data_usage --description "流量管理"
 python settings_tool.py traverse
 python settings_tool.py crop
 python settings_tool.py visual-prepare
@@ -18,7 +20,22 @@ python settings_tool.py yolo-match
 
 ## 核心结构
 
-这套程序分四层，分别回答四个问题：
+新录制主流程以“轻量导航状态图 + 路径动作录制器”为核心；旧的页面树、状态机、组件树和组件清单仍保留用于兼容已有遍历/视觉检测流程。
+
+### 新主产物：轻量导航状态图
+
+| 输出 | 作用 |
+| --- | --- |
+| `outputs/navigation/settings_navigation_graph.json` | 主数据库：记录 `from_page -> operate(target) -> to_page` 的所有可达分支 |
+| `outputs/navigation/current_pending_transition.json` | 记录用户已选择入口、但尚未确认目标页面的未完成转移 |
+| `outputs/navigation/current_path_session.json` | 预留给后续路径会话状态 |
+| `outputs/navigation/settings_path_cases.json` | 从 navigation graph 通过 BFS 派生出的轻量 `path_snapshot` |
+
+路径 step 只保留 `type`、`operate`、`value`、`key_description`、`step_prompt` 以及可选的 `scope`、`expect`、`axis`。普通纵向滚动是执行器查找策略，不写入图或 `path_snapshot`；局部横向滑动（`hl`/`hr`）会生成轻量 `local_view` 状态（如 `Pages_theme__view_h1`），并标记 `effect=local_horizontal_view_changed`，因此后续 `nav-path` 能把横向滑动步骤纳入路径。
+
+### 旧兼容产物
+
+旧流程仍分四层，分别回答四个问题：
 
 | 层 | 输出 | 作用 |
 | --- | --- | --- |
@@ -40,40 +57,51 @@ python settings_tool.py yolo-match
 
 采集或解析当前页面，并更新页面树、状态机、组件树：
 
-```bash
+```powershell
 python settings_tool.py record
 python settings_tool.py record --skip-capture
 python settings_tool.py record --skip-capture --json current_ui_tree.json --no-prompt
 ```
 
+录制轻量导航状态图：
+
+```powershell
+python settings_tool.py nav-record
+python settings_tool.py nav-pending-clear
+python settings_tool.py nav-graph-show
+python settings_tool.py nav-path --to Pages_data_usage --description "流量管理"
+```
+
+`nav-record` 每次都会 dump 当前 UI，识别当前 state，并展示可点击候选项。选择候选编号会生成 `current_pending_transition.json`；用户手动进入下一页后再次运行 `nav-record`，确认即可把 pending 补全为 `settings_navigation_graph.json` 中的一条 transition。选择 `hl`/`hr` 会直接记录局部横向滑动自环 transition；不会记录普通上下滚动。
+
 生成检测遍历任务：
 
-```bash
+```powershell
 python settings_tool.py traverse
 python settings_tool.py traverse --run
 ```
 
 按组件 bounds 裁剪当前截图中的组件小图：
 
-```bash
+```powershell
 python settings_tool.py crop --page-id "title::流量管理"
 ```
 
 生成规则检测、VLM 请求和 LLM 裁决请求：
 
-```bash
+```powershell
 python settings_tool.py visual-prepare --vlm-all
 ```
 
 接入 YOLO 备份检测结果并和 UI tree 组件匹配：
 
-```bash
+```powershell
 python settings_tool.py yolo-match --detections-json detections.json
 ```
 
 清理状态机：
 
-```bash
+```powershell
 python settings_tool.py sm-prune
 python settings_tool.py sm-reset
 python settings_tool.py sm-delete-state root/WLAN
@@ -82,7 +110,7 @@ python settings_tool.py sm-delete-transition <transition_id>
 
 清理页面树，同时同步清理状态机引用：
 
-```bash
+```powershell
 python settings_tool.py tree-delete 7.3
 python settings_tool.py tree-clear 7.3
 python settings_tool.py tree-reset
