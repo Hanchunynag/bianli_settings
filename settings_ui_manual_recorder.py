@@ -270,7 +270,11 @@ def save_navigation_graph(graph: Dict[str, Any], work_dir: Path) -> None:
     save_json(graph, navigation_graph_path(work_dir), "轻量导航状态图")
 
 
-def is_stable_key(key: Any) -> bool:
+def current_path_session_path(work_dir: Path) -> Path:
+    return navigation_dir(work_dir) / "current_path_session.json"
+
+
+def is_stable_key_for_navigation(key: Any) -> bool:
     text = str(key or "").strip()
     if not text or "*" in text or "AvailableDeviceGroup" in text:
         return False
@@ -281,7 +285,7 @@ def is_stable_key(key: Any) -> bool:
     return True
 
 
-def is_stable_text(text: Any) -> bool:
+def is_stable_text_for_navigation(text: Any) -> bool:
     value = clean_label(str(text or ""))
     if not value:
         return False
@@ -328,7 +332,7 @@ def build_navigation_state(root: Node) -> Dict[str, Any]:
     scope_root = dialog_root or root
     title = page.get("title") or (nearest_label(scope_root) if dialog_root else "")
     page_name = state_name_from_title(title or page.get("page_id", "page"), overlay=bool(dialog_root))
-    texts = [t for t in meaningful_texts(scope_root) if is_stable_text(t)][:8]
+    texts = [t for t in meaningful_texts(scope_root) if is_stable_text_for_navigation(t)][:8]
     return {
         "page_name": page_name,
         "page_description": ("弹窗：" if dialog_root else "") + (title or page_name),
@@ -341,13 +345,13 @@ def build_navigation_state(root: Node) -> Dict[str, Any]:
 
 
 def target_from_node(node: Node, dialog: bool = False) -> Dict[str, Any]:
-    text = next((t for t in meaningful_texts(node) if is_stable_text(t)), "")
+    text = next((t for t in meaningful_texts(node) if is_stable_text_for_navigation(t)), "")
     key = get_key(node)
     label = text or nearest_label(node)
     rect = parse_rect(get_attr(node, "bounds"))
     if text:
         target = {"type": "text", "value": text, "key_description": text, "step_prompt": text}
-    elif is_stable_key(key):
+    elif is_stable_key_for_navigation(key):
         desc = label or key
         target = {"type": "key", "value": key, "key_description": desc, "step_prompt": desc}
     else:
@@ -369,7 +373,7 @@ def extract_navigation_candidates(root_json: Node) -> List[Dict[str, Any]]:
             return False
         if get_type(n) not in preferred:
             return False
-        if has_sensitive_key_in_subtree(n) or not is_stable_key(get_key(n)) and not any(is_stable_text(t) for t in meaningful_texts(n)):
+        if has_sensitive_key_in_subtree(n) or not is_stable_key_for_navigation(get_key(n)) and not any(is_stable_text_for_navigation(t) for t in meaningful_texts(n)):
             # 没有稳定 text/key 时仍允许 bounds 兜底，但动态敏感项必须排除。
             if has_sensitive_key_in_subtree(n):
                 return False
@@ -391,8 +395,8 @@ def extract_navigation_candidates(root_json: Node) -> List[Dict[str, Any]]:
         seen.add(sig)
         candidates.append({
             "index": len(candidates) + 1,
-            "text": next((t for t in meaningful_texts(n) if is_stable_text(t)), ""),
-            "key": get_key(n) if is_stable_key(get_key(n)) else "",
+            "text": next((t for t in meaningful_texts(n) if is_stable_text_for_navigation(t)), ""),
+            "key": get_key(n) if is_stable_key_for_navigation(get_key(n)) else "",
             "type": get_type(n),
             "bounds": get_attr(n, "bounds"),
             "bounds_center": rect["center"],
@@ -401,8 +405,21 @@ def extract_navigation_candidates(root_json: Node) -> List[Dict[str, Any]]:
     return candidates
 
 
-def transition_id(from_page: str, operate: str, to_page: str) -> str:
-    return f"{from_page}__{operate}__{to_page}"
+def transition_id(from_page: str, operate: str, to_page: str, target: Optional[Dict[str, Any]] = None, effect: str = "") -> str:
+    target = target or {}
+    pieces = [
+        from_page,
+        operate,
+        to_page,
+        str(target.get("type", "")),
+        json.dumps(target.get("value", ""), ensure_ascii=False, sort_keys=True),
+        str(target.get("key_description", "")),
+        str(target.get("scope", "")),
+        str(target.get("axis", "")),
+        effect,
+    ]
+    digest = hashlib.sha256("|".join(pieces).encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"{from_page}__{operate}__{to_page}__{digest}"
 
 
 def add_transition(graph: Dict[str, Any], transition: Dict[str, Any]) -> None:
@@ -426,6 +443,49 @@ def horizontal_target(direction: str) -> Dict[str, Any]:
         "step_prompt": "在横向列表中向左滑动一次" if left else "在横向列表中向右滑动一次",
         "axis": "horizontal",
         "scope": "local_container",
+    }
+
+
+def load_current_path_session(work_dir: Path) -> Dict[str, Any]:
+    path = current_path_session_path(work_dir)
+    if path.exists():
+        data = load_json(path)
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
+def save_current_path_session(work_dir: Path, active_page: str, base_page: Optional[str] = None) -> None:
+    data = {"active_page": active_page, "updated_at": now_iso()}
+    if base_page:
+        data["base_page"] = base_page
+    save_json(data, current_path_session_path(work_dir), "当前导航录制会话")
+
+
+def active_navigation_state(work_dir: Path, graph: Dict[str, Any], detected_state: Dict[str, Any]) -> Dict[str, Any]:
+    session = load_current_path_session(work_dir)
+    active_page = str(session.get("active_page") or "")
+    active_state = graph.get("states", {}).get(active_page)
+    if isinstance(active_state, dict) and active_state.get("state_type") == "local_view":
+        if active_state.get("base_page") == detected_state.get("page_name"):
+            return active_state
+    return detected_state
+
+
+def next_horizontal_view_state(graph: Dict[str, Any], base_page: str) -> Dict[str, Any]:
+    max_index = 0
+    pattern = re.compile(rf"^{re.escape(base_page)}__view_h(\d+)$")
+    for name in graph.get("states", {}):
+        match = pattern.match(str(name))
+        if match:
+            max_index = max(max_index, int(match.group(1)))
+    next_index = max_index + 1
+    page_name = f"{base_page}__view_h{next_index}"
+    return {
+        "page_name": page_name,
+        "page_description": f"{base_page} 横向视图 {next_index}",
+        "base_page": base_page,
+        "state_type": "local_view",
+        "effect": "local_horizontal_view_changed",
     }
 
 
@@ -866,13 +926,13 @@ def component_identity(page_id: str, source: str, item: Dict[str, Any]) -> Tuple
     index_path_value = str(item.get("index_path") or "")
     bounds = str(item.get("bounds") or "")
 
-    if key and is_stable_key(key):
+    if key and is_stable_key_for_signature(key):
         strategy = "stable_key"
         value = key
     elif key_hash:
         strategy = "key_fingerprint"
         value = key_hash
-    elif text and is_stable_text(text):
+    elif text and is_stable_text_for_signature(text):
         strategy = "stable_text"
         value = f"{kind}|{node_type}|{text}"
     elif type_path_value:
@@ -2836,17 +2896,20 @@ def complete_pending_if_needed(work_dir: Path, graph: Dict[str, Any], state: Dic
     print(f"当前 dump 页面识别为 {state.get('page_name')}")
     choice = input("是否将其补全为 transition？[y/n]: ").strip().lower()
     if choice == "y":
+        target = pending.get("target", {})
+        effect = pending.get("effect", "")
         transition = {
-            "transition_id": transition_id(pending["from_page"], pending.get("operate", "tap"), state["page_name"]),
+            "transition_id": transition_id(pending["from_page"], pending.get("operate", "tap"), state["page_name"], target, effect),
             "from_page": pending["from_page"],
             "to_page": state["page_name"],
             "operate": pending.get("operate", "tap"),
-            "target": pending.get("target", {}),
+            "target": target,
         }
-        if pending.get("effect"):
-            transition["effect"] = pending["effect"]
+        if effect:
+            transition["effect"] = effect
         add_transition(graph, transition)
         save_navigation_graph(graph, work_dir)
+        save_current_path_session(work_dir, state["page_name"])
         path.unlink()
         print("✓ 已补全 transition 并清空 pending")
         return True
@@ -2877,10 +2940,12 @@ def run_nav_record(args: argparse.Namespace, work_dir: Path, output_dir: Path) -
     graph.setdefault("states", {})[state["page_name"]] = state
     save_navigation_graph(graph, work_dir)
     complete_pending_if_needed(work_dir, graph, state)
+    active_state = active_navigation_state(work_dir, graph, state)
+    active_page = active_state["page_name"]
 
     candidates = extract_navigation_candidates(root_json)
     print("\n当前页面状态")
-    print(f"page_name={state['page_name']}  title={state.get('last_title')}")
+    print(f"page_name={state['page_name']}  active_nav_state={active_page}  title={state.get('last_title')}")
     print("\n候选入口（普通上下滚动不会记录；hl/hr 会记录横向局部滑动）")
     for c in candidates:
         print(f"{c['index']}. [{c.get('type')}] text=\"{c.get('text')}\" key={c.get('key') or '(无 key)'} center={c.get('bounds_center')}")
@@ -2894,17 +2959,22 @@ def run_nav_record(args: argparse.Namespace, work_dir: Path, output_dir: Path) -
     if choice in {"hl", "hr"}:
         operate = "swipe_left" if choice == "hl" else "swipe_right"
         target = horizontal_target("left" if choice == "hl" else "right")
+        view_state = next_horizontal_view_state(graph, str(active_state.get("base_page") or active_page))
+        graph.setdefault("states", {})[view_state["page_name"]] = view_state
+        effect = "local_horizontal_view_changed"
         trans = {
-            "transition_id": transition_id(state["page_name"], operate, state["page_name"]),
-            "from_page": state["page_name"],
-            "to_page": state["page_name"],
+            "transition_id": transition_id(active_page, operate, view_state["page_name"], target, effect),
+            "from_page": active_page,
+            "to_page": view_state["page_name"],
             "operate": operate,
             "target": target,
-            "effect": "local_horizontal_view_changed",
+            "effect": effect,
+            "base_page": view_state["base_page"],
         }
         add_transition(graph, trans)
         save_navigation_graph(graph, work_dir)
-        print("✓ 已记录横向滑动 transition（from_page == to_page）")
+        save_current_path_session(work_dir, view_state["page_name"], view_state["base_page"])
+        print(f"✓ 已记录横向滑动 transition: {active_page} -> {view_state['page_name']}")
         return
     if choice == "s":
         operate, target, effect = prompt_special_target()
@@ -2920,7 +2990,7 @@ def run_nav_record(args: argparse.Namespace, work_dir: Path, output_dir: Path) -
         expect = input("expect（可空/dialog/same_page/new_page/list_changed）: ").strip()
         if expect:
             target["expect"] = expect
-    pending = {"from_page": state["page_name"], "operate": operate, "target": target, "created_at": now_iso()}
+    pending = {"from_page": active_page, "operate": operate, "target": target, "created_at": now_iso()}
     if effect:
         pending["effect"] = effect
     save_json(pending, pending_transition_path(work_dir), "未完成导航转移")
@@ -2941,7 +3011,7 @@ def build_nav_path(work_dir: Path, to_page: str, description: str = "") -> None:
                 "page_description": description or graph.get("states", {}).get(to_page, {}).get("page_description", to_page),
                 "path_snapshot": path,
             }
-            save_json(result, path_cases_path(work_dir), "轻量路径用例")
+            append_path_case(work_dir, result)
             return
         for t in graph.get("transitions", []):
             if t.get("from_page") != page:
@@ -2955,6 +3025,22 @@ def build_nav_path(work_dir: Path, to_page: str, description: str = "") -> None:
                 seen.add(nxt)
                 queue.append((nxt, path + [step]))
     print(f"✗ 未找到从 Pages_root 到 {to_page} 的路径")
+
+
+def append_path_case(work_dir: Path, result: Dict[str, Any]) -> None:
+    path = path_cases_path(work_dir)
+    if path.exists():
+        existing = load_json(path)
+        cases = existing if isinstance(existing, list) else [existing]
+    else:
+        cases = []
+    desc = str(result.get("page_description") or "")
+    cases = [
+        c for c in cases
+        if isinstance(c, dict) and str(c.get("page_description") or "") != desc
+    ]
+    cases.append(result)
+    save_json(cases, path, "轻量路径用例")
 
 
 def main() -> None:
@@ -3123,7 +3209,7 @@ def ensure_state_machine(index):
             sm[key] = {}
 
 
-def is_stable_key(key):
+def is_stable_key_for_signature(key):
     """判断 key 是否适合作为页面签名的一部分。"""
     text = str(key or "").strip()
     if not text:
@@ -3149,7 +3235,7 @@ def is_stable_key(key):
     return bool(re.search(r"[A-Za-z_\u4e00-\u9fff]", text))
 
 
-def is_stable_text(text):
+def is_stable_text_for_signature(text):
     """判断文本是否适合作为页面签名的一部分。"""
     value = clean_label(str(text or "").strip())
     if not value or value in NOISE_TEXTS:
@@ -3237,15 +3323,15 @@ def build_tap_target(selected_node, screen_metrics):
     screen_size = screen_metrics.get("screen_size") if isinstance(screen_metrics, dict) else None
     fallback_order = []
 
-    if key and is_stable_key(key):
+    if key and is_stable_key_for_signature(key):
         preferred = "key"
         fallback_order.append("key")
-    elif text and is_stable_text(text):
+    elif text and is_stable_text_for_signature(text):
         preferred = "text_type"
     else:
         preferred = "bounds_center"
 
-    if text and is_stable_text(text):
+    if text and is_stable_text_for_signature(text):
         fallback_order.append("text_type")
     if selected_node.get("type_path"):
         fallback_order.append("type_path")
@@ -3291,10 +3377,10 @@ def build_page_signature(root_json, page, controls, component_inventory=None, is
         if is_sensitive_key(ctrl_key) or is_sensitive_entry_control(ctrl):
             continue
 
-        if is_stable_key(ctrl_key):
+        if is_stable_key_for_signature(ctrl_key):
             append_unique_limited(required_keys_any, ctrl_key, 5)
 
-        if is_stable_text(ctrl_text):
+        if is_stable_text_for_signature(ctrl_text):
             append_unique_limited(required_texts_any, clean_label(ctrl_text), 8)
 
     signature_content = f"{title}|{nav_key}|{'|'.join(sorted(required_keys_any))}|{'|'.join(sorted(required_texts_any))}"

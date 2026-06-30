@@ -31,7 +31,7 @@ python settings_tool.py yolo-match
 | `outputs/navigation/current_path_session.json` | 预留给后续路径会话状态 |
 | `outputs/navigation/settings_path_cases.json` | 从 navigation graph 通过 BFS 派生出的轻量 `path_snapshot` |
 
-路径 step 只保留 `type`、`operate`、`value`、`key_description`、`step_prompt` 以及可选的 `scope`、`expect`、`axis`。普通纵向滚动是执行器查找策略，不写入图或 `path_snapshot`；局部横向滑动（`hl`/`hr`）会写入自环 transition，并标记 `effect=local_horizontal_view_changed`。
+路径 step 只保留 `type`、`operate`、`value`、`key_description`、`step_prompt` 以及可选的 `scope`、`expect`、`axis`。普通纵向滚动是执行器查找策略，不写入图或 `path_snapshot`；局部横向滑动（`hl`/`hr`）会生成轻量 `local_view` 状态（如 `Pages_theme__view_h1`），并标记 `effect=local_horizontal_view_changed`，因此后续 `nav-path` 能把横向滑动步骤纳入路径。
 
 ### 旧兼容产物
 
