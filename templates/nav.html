@@ -16,8 +16,11 @@
         <span>title: <b id="title">-</b></span>
         <span>pending: <b id="pending">-</b></span>
         <span>mode: <b id="modeLabel">tap</b></span>
+        <span>续录次数: <b id="continuedCount">0</b></span>
+        <span>合并候选: <b id="mergedCount">0</b></span>
         <span id="coordLabel" class="coord">坐标: -</span>
       </div>
+      <div id="success" class="success hidden"></div>
       <div id="warning" class="warning hidden"></div>
       <div id="error" class="error hidden"></div>
     </div>
@@ -27,6 +30,7 @@
       <button id="modeSwipeRightBtn" class="mode">右滑 swipe_right</button>
       <button id="backBtn">返回 back</button>
       <button id="captureBtn">重新采集 capture</button>
+      <button id="continueBtn">继续录制当前页面</button>
       <button id="clearPendingBtn">清空 pending</button>
       <button id="undoBtn">撤销上一步 undo_last</button>
       <button id="graphBtn">查看 graph JSON</button>

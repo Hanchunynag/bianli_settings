@@ -25,10 +25,16 @@ function showError(message) {
   el('error').classList.toggle('hidden', !message);
 }
 
+function showSuccess(message) {
+  el('success').textContent = message || '';
+  el('success').classList.toggle('hidden', !message);
+}
+
 async function api(path, options = {}) {
   if (busy) return;
   setBusy(true);
   showError('');
+  showSuccess('');
   try {
     const res = await fetch(path, options);
     const data = await res.json();
@@ -49,6 +55,8 @@ function render(data) {
   el('activePage').textContent = data.active_page || data.active_state?.page_name || '-';
   el('title').textContent = data.state?.last_title || '-';
   el('pending').textContent = data.pending ? `${data.pending.from_page} -> ${(data.pending.target || {}).step_prompt || (data.pending.target || {}).value || ''}` : '无';
+  el('continuedCount').textContent = data.continued_captures_count ?? data.active_state?.continued_captures?.length ?? 0;
+  el('mergedCount').textContent = data.merged_candidates_count ?? (data.active_state?.merged_candidates ? Object.keys(data.active_state.merged_candidates).length : 0);
   el('warning').textContent = data.warning || '';
   el('warning').classList.toggle('hidden', !data.warning);
   if (data.screenshot_url) el('screen').src = data.screenshot_url;
@@ -178,6 +186,13 @@ el('modeSwipeLeftBtn').onclick = () => setMode('swipe_left');
 el('modeSwipeRightBtn').onclick = () => setMode('swipe_right');
 el('captureBtn').onclick = async () => render(await api('/api/capture', { method: 'POST' }));
 el('backBtn').onclick = async () => render(await api('/api/back', { method: 'POST' }));
+el('continueBtn').onclick = async () => {
+  const data = await api('/api/continue_current_page', { method: 'POST' });
+  if (data) {
+    render(data);
+    showSuccess(`已继续录制当前页面，本次新增/合并候选入口 ${data.added_merged_candidates_count ?? 0} 个。`);
+  }
+};
 el('clearPendingBtn').onclick = async () => { await api('/api/clear_pending', { method: 'POST' }); render(await api('/api/state')); };
 el('undoBtn').onclick = async () => render(await api('/api/undo_last', { method: 'POST' }));
 el('graphBtn').onclick = async () => {

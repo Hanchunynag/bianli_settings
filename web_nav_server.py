@@ -3,7 +3,9 @@
 """FastAPI 设置导航录制 Web 控制台。"""
 
 import argparse
+import hashlib
 import json
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -347,6 +349,150 @@ def undo_last_web_record(work_dir: Path) -> Dict[str, Any]:
     return record
 
 
+
+def candidate_merge_key(candidate: Dict[str, Any]) -> str:
+    """为继续录制候选入口生成稳定去重 key。"""
+    key = str(candidate.get("key") or "").strip()
+    if key:
+        return f"key::{key}"
+    text = str(candidate.get("text") or "").strip()
+    ctype = str(candidate.get("type") or "")
+    if text:
+        return f"text::{ctype}::{text}"
+    center = candidate.get("bounds_center") or ["", ""]
+    x = center[0] if isinstance(center, list) and len(center) > 0 else ""
+    y = center[1] if isinstance(center, list) and len(center) > 1 else ""
+    return f"bounds::{ctype}::{x}::{y}"
+
+
+def candidates_content_signature(candidates: List[Dict[str, Any]]) -> str:
+    """基于当前屏幕候选入口生成内容签名，用于识别重复视图。"""
+    pieces = []
+    for candidate in candidates:
+        pieces.append({
+            "text": candidate.get("text") or "",
+            "key": candidate.get("key") or "",
+            "type": candidate.get("type") or "",
+            "bounds_center": candidate.get("bounds_center") or [],
+        })
+    payload = json.dumps(pieces, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def next_continue_capture_id(state: Dict[str, Any], active_page: str) -> str:
+    """为当前页面生成 Pages_xxx__continue_NNN 格式的续录 capture_id。"""
+    captures = state.setdefault("continued_captures", [])
+    return f"{active_page}__continue_{len(captures) + 1:03d}"
+
+
+def current_active_page_without_pending(work_dir: Path, fallback_state: Optional[Dict[str, Any]] = None) -> str:
+    """读取当前 active_page；不读取或创建 pending，不改变 current_path_session。"""
+    session = load_current_path_session(work_dir)
+    active_page = str(session.get("active_page") or "")
+    if active_page:
+        return active_page
+    if fallback_state and fallback_state.get("page_name"):
+        return str(fallback_state["page_name"])
+    return ""
+
+
+def merge_continue_candidates(state: Dict[str, Any], candidates: List[Dict[str, Any]], capture_id: str, captured_at: str) -> int:
+    """把本屏候选入口合并到 state.merged_candidates，并返回新增数量。"""
+    merged = state.setdefault("merged_candidates", {})
+    added = 0
+    for candidate in candidates:
+        key = candidate_merge_key(candidate)
+        if key not in merged:
+            item = {
+                "text": candidate.get("text") or "",
+                "key": candidate.get("key") or "",
+                "type": candidate.get("type") or "",
+                "bounds": candidate.get("bounds") or "",
+                "bounds_center": candidate.get("bounds_center"),
+                "source_capture_id": capture_id,
+                "first_seen_at": captured_at,
+                "last_seen_capture_id": capture_id,
+                "last_seen_at": captured_at,
+            }
+            merged[key] = item
+            added += 1
+        else:
+            merged[key]["last_seen_capture_id"] = capture_id
+            merged[key]["last_seen_at"] = captured_at
+    return added
+
+
+def continue_current_page_capture() -> Dict[str, Any]:
+    """手动滚动后的当前页面续录：只合并候选入口，不生成 transition/pending，不修改 active_page。"""
+    # 先用 latest 文件识别 fallback active_state；这一步不强制采集，也不读 pending。
+    fallback_state: Optional[Dict[str, Any]] = None
+    latest_json = config.output_dir / "current_ui_tree.json"
+    if latest_json.exists():
+        latest_root = load_json(latest_json)
+        annotate(latest_root)
+        graph_for_fallback = load_navigation_graph(config.work_dir)
+        fallback_state = active_navigation_state(config.work_dir, graph_for_fallback, build_navigation_state(latest_root))
+    active_page = current_active_page_without_pending(config.work_dir, fallback_state)
+    if not active_page:
+        raise RuntimeError("无法确定 active_page，请先点击“重新采集”。")
+
+    if not capture_artifacts(config.device_id, config.output_dir):
+        raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
+    root_json = load_json(config.output_dir / "current_ui_tree.json")
+    annotate(root_json)
+    detected_state = build_navigation_state(root_json)
+    if detected_state.get("page_name") != active_page:
+        raise RuntimeError("当前页面与 active_page 不一致，不能作为当前页面续录。请确认是否误进入新页面。")
+
+    candidates = extract_navigation_candidates(root_json)
+    graph = load_navigation_graph(config.work_dir)
+    state = graph.setdefault("states", {}).setdefault(active_page, detected_state)
+    # 保留原页面身份字段，但用本次识别结果刷新 title/signature 等基础信息。
+    for field in ["page_name", "page_description", "last_title", "signature"]:
+        state[field] = detected_state.get(field, state.get(field))
+
+    signature = candidates_content_signature(candidates)
+    captures = state.setdefault("continued_captures", [])
+    duplicate = next((c for c in captures if c.get("content_signature") == signature), None)
+    captured_at = now_iso()
+    warning = ""
+    if duplicate:
+        capture_id = str(duplicate.get("capture_id") or next_continue_capture_id(state, active_page))
+        warning = "当前视图可能已经录制过，本次未重复追加 capture，但已刷新当前截图和候选入口。"
+    else:
+        capture_id = next_continue_capture_id(state, active_page)
+        rel_screenshot = Path("outputs") / "navigation" / "continued_captures" / f"{capture_id}.png"
+        screenshot_path = config.work_dir / rel_screenshot
+        screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(config.output_dir / "current_screen.png", screenshot_path)
+        captures.append({
+            "capture_id": capture_id,
+            "captured_at": captured_at,
+            "screenshot": rel_screenshot.as_posix(),
+            "candidate_count": len(candidates),
+            "texts": [c.get("text") for c in candidates if c.get("text")][:20],
+            "content_signature": signature,
+        })
+
+    added = merge_continue_candidates(state, candidates, capture_id, captured_at)
+    save_navigation_graph(graph, config.work_dir)
+    screen_metrics = screen_metrics_from_root(root_json)
+    return {
+        "state": detected_state,
+        "active_state": state,
+        "active_page": active_page,
+        "candidates": candidates,
+        "continued_captures_count": len(state.get("continued_captures", [])),
+        "merged_candidates_count": len(state.get("merged_candidates", {})),
+        "added_merged_candidates_count": added,
+        "pending": None,
+        "warning": warning,
+        "screenshot_url": f"/screen?t={int(time.time() * 1000)}",
+        "screen_metrics": screen_metrics,
+        "screen_size": screen_metrics.get("screen_size"),
+    }
+
+
 def pending_data() -> Optional[Dict[str, Any]]:
     path = pending_transition_path(config.work_dir)
     return load_json(path) if path.exists() else None
@@ -378,6 +524,12 @@ def read_current_state(capture: bool) -> Dict[str, Any]:
     graph.setdefault("states", {})[state["page_name"]] = state
     save_navigation_graph(graph, config.work_dir)
     active_state = active_navigation_state(config.work_dir, graph, state)
+    graph_state = graph.get("states", {}).get(active_state.get("page_name"), {})
+    if isinstance(graph_state, dict):
+        if "continued_captures" in graph_state:
+            active_state.setdefault("continued_captures", graph_state.get("continued_captures", []))
+        if "merged_candidates" in graph_state:
+            active_state.setdefault("merged_candidates", graph_state.get("merged_candidates", {}))
     candidates = extract_navigation_candidates(root_json)
     screen_metrics = screen_metrics_from_root(root_json)
     return {
@@ -385,6 +537,8 @@ def read_current_state(capture: bool) -> Dict[str, Any]:
         "active_state": active_state,
         "active_page": active_state.get("page_name"),
         "candidates": candidates,
+        "continued_captures_count": len(active_state.get("continued_captures", [])),
+        "merged_candidates_count": len(active_state.get("merged_candidates", {})),
         "pending": pending_data(),
         "warning": warning_for_state(graph, state),
         "screenshot_url": f"/screen?t={int(time.time() * 1000)}",
@@ -540,6 +694,14 @@ def api_swipe_horizontal(req: SwipeHorizontalRequest) -> JSONResponse:
         size = current.get("screen_size") or [1080, 2400]
         x, y = int(size[0] / 2), int(size[1] * 0.55)
         return api_swipe_point(SwipePointRequest(x=x, y=y, normalized_point=normalize_from_screen([x, y], current), direction=req.direction))
+    except Exception as exc:
+        return error_response(str(exc))
+
+
+@app.post("/api/continue_current_page")
+def api_continue_current_page() -> JSONResponse:
+    try:
+        return ok_response(**continue_current_page_capture())
     except Exception as exc:
         return error_response(str(exc))
 
