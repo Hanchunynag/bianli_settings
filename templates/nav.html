@@ -17,12 +17,15 @@
         <span>pending: <b id="pending">-</b></span>
       </div>
       <div id="warning" class="warning hidden"></div>
+      <div id="overlayStatus" class="warning hidden"></div>
       <div id="error" class="error hidden"></div>
     </div>
     <div class="actions">
       <button id="captureBtn">重新采集</button>
       <button id="backBtn">返回</button>
       <button id="clearPendingBtn">清空 pending</button>
+      <button id="markOverlayBtn">标记当前页面为弹窗</button>
+      <button id="samePageModeBtn">录制页面内变化</button>
       <button id="graphBtn">查看 graph JSON</button>
       <button id="swipeLeftBtn">横向左滑</button>
       <button id="swipeRightBtn">横向右滑</button>
@@ -30,6 +33,11 @@
   </header>
   <div id="loading" class="loading hidden">正在执行，请稍候…</div>
   <main class="layout">
+    <section class="directoryPanel">
+      <h2>页面目录</h2>
+      <div id="pageDirectory" class="directory"></div>
+      <div id="pageDetail" class="pageDetail"></div>
+    </section>
     <section class="screenPanel">
       <div class="screenWrap" id="screenWrap">
         <img id="screen" alt="current_screen.png" />
@@ -38,6 +46,7 @@
     </section>
     <section class="listPanel">
       <h2>候选入口</h2>
+      <button id="continuePageBtn" class="secondary">继续录制当前页面</button>
       <div id="candidates" class="candidates"></div>
       <pre id="graphBox" class="graphBox hidden"></pre>
     </section>

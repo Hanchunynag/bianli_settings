@@ -25,3 +25,12 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .graphBox { max-height: 70vh; overflow: auto; background: #0f172a; color: #dbeafe; padding: 12px; border-radius: 8px; }
 .hidden { display: none; }
 @media (max-width: 900px) { .topbar, .layout { display: block; } .actions { min-width: 0; justify-content: flex-start; margin-top: 12px; } .listPanel { margin-top: 16px; } }
+.directoryPanel { background: #fff; border: 1px solid #dfe3eb; border-radius: 10px; padding: 12px; max-height: calc(100vh - 120px); overflow: auto; }
+.layout { grid-template-columns: minmax(260px, 22vw) minmax(320px, 38vw) 1fr; }
+.dirNode, .detailRow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid #edf0f5; font-size: 13px; }
+.dirNode code { color: #6b7485; }
+.pageDetail { margin-top: 12px; border-top: 1px solid #dfe3eb; padding-top: 8px; }
+.pageDetail h3, .pageDetail h4 { margin: 10px 0 6px; }
+button.danger { background: #d64545; border-color: #d64545; }
+.candidate h3 { margin: 0; }
+.candidates h3 { margin: 12px 0 4px; padding-top: 8px; border-top: 1px solid #edf0f5; }
