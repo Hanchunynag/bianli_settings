@@ -83,6 +83,14 @@ class TapSamePageOperationRequest(BaseModel):
     manual_label: str = ""
 
 
+class PageGestureOperationRequest(BaseModel):
+    x: int
+    y: int
+    operate: str
+    effect: str = ""
+    manual_label: str = ""
+
+
 class SwipeHorizontalRequest(BaseModel):
     direction: str
 
@@ -200,9 +208,58 @@ def execute_horizontal_swipe(device_id: str, direction: str, metrics: Dict[str, 
     ], f"横向{direction}滑动")
 
 
+def execute_gesture_operation(device_id: str, operate: str, center: List[int], metrics: Dict[str, Any]) -> None:
+    if not isinstance(center, list) or len(center) != 2:
+        raise ValueError("center 必须是 [x, y]")
+    x, y = int(center[0]), int(center[1])
+    size = metrics.get("screen_size") or [1080, 2400]
+    width, height = int(size[0]), int(size[1])
+    dx = max(160, int(width * 0.22))
+    dy = max(180, int(height * 0.12))
+    if operate == "tap":
+        execute_tap(device_id, [x, y])
+        return
+    if operate == "long_press":
+        x1, y1, x2, y2, duration = x, y, x, y, "900"
+    elif operate == "swipe_left":
+        x1, y1, x2, y2, duration = x + dx // 2, y, x - dx // 2, y, "600"
+    elif operate == "swipe_right":
+        x1, y1, x2, y2, duration = x - dx // 2, y, x + dx // 2, y, "600"
+    elif operate == "swipe_up":
+        x1, y1, x2, y2, duration = x, y + dy // 2, x, y - dy // 2, "600"
+    elif operate == "swipe_down":
+        x1, y1, x2, y2, duration = x, y - dy // 2, x, y + dy // 2, "600"
+    else:
+        raise ValueError("operate 必须是 tap/long_press/swipe_left/swipe_right/swipe_up/swipe_down")
+    base = ["hdc", "-t", device_id, "shell"]
+    run_hdc_with_fallback([
+        base + ["uitest", "uiInput", "swipe", str(x1), str(y1), str(x2), str(y2), duration],
+        base + ["input", "swipe", str(x1), str(y1), str(x2), str(y2), duration],
+    ], f"{operate} 手势")
+
+
 def pending_data() -> Optional[Dict[str, Any]]:
     path = pending_transition_path(config.work_dir)
     return load_json(path) if path.exists() else None
+
+
+def pending_action_chain_path() -> Path:
+    return config.work_dir / "outputs" / "navigation" / "pending_action_chain.json"
+
+
+def pending_action_chain() -> Optional[Dict[str, Any]]:
+    path = pending_action_chain_path()
+    return load_json(path) if path.exists() else None
+
+
+def save_pending_action_chain(chain: Dict[str, Any]) -> None:
+    save_json(chain, pending_action_chain_path(), "未完成多步骤跳转")
+
+
+def clear_pending_action_chain() -> None:
+    path = pending_action_chain_path()
+    if path.exists():
+        path.unlink()
 
 
 def has_parent_transition(graph: Dict[str, Any], page_name: str) -> bool:
@@ -211,12 +268,12 @@ def has_parent_transition(graph: Dict[str, Any], page_name: str) -> bool:
 
 def warning_for_state(graph: Dict[str, Any], state: Dict[str, Any]) -> str:
     page = state.get("page_name", "")
-    if page and page != "Pages_root" and not pending_transition_path(config.work_dir).exists() and not has_parent_transition(graph, page):
+    if page and page != "Pages_root" and not pending_transition_path(config.work_dir).exists() and not pending_action_chain() and not has_parent_transition(graph, page):
         return "当前页面没有 pending transition，且导航图中没有父级来源。说明你可能是手动进入了当前页面，无法自动知道父级页面。请返回父页面后点击候选入口录制。"
     return ""
 
 
-def read_current_state(capture: bool) -> Dict[str, Any]:
+def read_current_state(capture: bool, persist_candidates: bool = True) -> Dict[str, Any]:
     """采集或读取 latest 文件，更新导航图状态并返回前端需要的数据。"""
     if capture and not capture_artifacts(config.device_id, config.output_dir):
         raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
@@ -234,12 +291,14 @@ def read_current_state(capture: bool) -> Dict[str, Any]:
         if existing_state.get("is_overlay"):
             preserve_keys.extend(["state_type", "is_overlay", "overlay_parent", "overlay_title", "page_description"])
         state.update({k: existing_state[k] for k in preserve_keys if k in existing_state})
-    graph.setdefault("states", {})[state["page_name"]] = state
+    if persist_candidates:
+        graph.setdefault("states", {})[state["page_name"]] = state
     candidates = extract_navigation_candidates(root_json)
-    state_entry = graph.setdefault("states", {}).setdefault(state["page_name"], state)
-    for c in candidates:
-        upsert_candidate(state_entry, candidate_from_auto(c, source="auto_detected"))
-    save_navigation_graph(graph, config.work_dir)
+    if persist_candidates:
+        state_entry = graph.setdefault("states", {}).setdefault(state["page_name"], state)
+        for c in candidates:
+            upsert_candidate(state_entry, candidate_from_auto(c, source="auto_detected"))
+        save_navigation_graph(graph, config.work_dir)
     active_state = active_navigation_state(config.work_dir, graph, state)
     active_page = active_state.get("page_name")
     merged_candidates = get_page_merged_candidates(graph, str(active_page or state["page_name"]), candidates)
@@ -251,9 +310,34 @@ def read_current_state(capture: bool) -> Dict[str, Any]:
         "candidates": candidates,
         "merged_candidates": merged_candidates,
         "pending": pending_data(),
+        "pending_action_chain": pending_action_chain(),
         "warning": warning_for_state(graph, state),
         "screenshot_url": f"/screen?t={int(time.time() * 1000)}",
         "screen_metrics": screen_metrics_from_root(root_json),
+    }
+
+
+def state_response_from_capture(
+    root_json: Dict[str, Any],
+    state: Dict[str, Any],
+    graph: Dict[str, Any],
+    active_page: str,
+    message: str = "",
+) -> Dict[str, Any]:
+    candidates = extract_navigation_candidates(root_json)
+    return {
+        "state": state,
+        "active_state": graph.get("states", {}).get(active_page, state),
+        "active_page": active_page,
+        "current_candidates": candidates,
+        "candidates": candidates,
+        "merged_candidates": get_page_merged_candidates(graph, active_page, []),
+        "pending": pending_data(),
+        "pending_action_chain": pending_action_chain(),
+        "warning": warning_for_state(graph, state),
+        "screenshot_url": f"/screen?t={int(time.time() * 1000)}",
+        "screen_metrics": screen_metrics_from_root(root_json),
+        "message": message,
     }
 
 
@@ -320,8 +404,6 @@ def candidate_from_auto(c: Dict[str, Any], source: str = "auto_detected") -> Dic
         "transition_ids": list(c.get("transition_ids") or []),
         "operation_ids": list(c.get("operation_ids") or []),
     }
-    if c.get("bounds_center") is not None:
-        item["bounds_center"] = c.get("bounds_center")
     item["candidate_id"] = candidate_merge_key(item)
     return item
 
@@ -343,6 +425,57 @@ def candidate_from_target(target: Dict[str, Any], source: str = "hit_test_click"
     }
     item["candidate_id"] = candidate_merge_key(item)
     return item
+
+
+def step_target(target: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {
+        "type",
+        "value",
+        "component_type",
+        "text",
+        "key",
+        "key_description",
+        "step_prompt",
+        "scope",
+        "expect",
+    }
+    clean = {k: v for k, v in target.items() if k in allowed and v not in (None, "", [])}
+    if target.get("value") and "key" not in clean and target.get("type") in {"key", "button"}:
+        clean["key"] = target.get("value")
+    return clean
+
+
+def transition_step(target: Dict[str, Any], operate: str = "tap") -> Dict[str, Any]:
+    return {"operate": operate, "target": step_target(target)}
+
+
+def transition_steps(transition: Dict[str, Any]) -> List[Dict[str, Any]]:
+    steps = transition.get("steps")
+    if isinstance(steps, list) and steps:
+        return [s for s in steps if isinstance(s, dict)]
+    target = transition.get("target") or {}
+    operate = str(transition.get("operate") or "tap")
+    return [transition_step(target, operate)] if target else []
+
+
+def transition_steps_label(steps: List[Dict[str, Any]]) -> str:
+    labels = []
+    for step in steps:
+        target = step.get("target") or {}
+        label = target.get("step_prompt") or target.get("key_description") or target.get("text") or target.get("value") or target.get("key") or step.get("operate")
+        labels.append(str(label))
+    return " -> ".join(labels)
+
+
+def transition_id_for_steps(from_page: str, to_page: str, steps: List[Dict[str, Any]], effect: str = "") -> str:
+    payload = {
+        "from_page": from_page,
+        "to_page": to_page,
+        "steps": steps,
+        "effect": effect,
+    }
+    digest = hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    return f"{from_page}__to__{to_page}__steps_{digest}"
 
 
 def component_summary_from_tree(root_json: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -500,6 +633,9 @@ def upsert_clicked_target_as_candidate(graph: Dict[str, Any], page_name: str, ta
 
 
 def transition_label(t: Dict[str, Any]) -> str:
+    steps = transition_steps(t)
+    if len(steps) > 1:
+        return transition_steps_label(steps)
     target = t.get("target") or {}
     return str(target.get("step_prompt") or target.get("key_description") or target.get("value") or t.get("operate") or "")
 
@@ -523,7 +659,14 @@ def build_page_directory(graph: Dict[str, Any]) -> Dict[str, Any]:
             child = str(t.get("to_page"))
             if child in seen or states.get(child, {}).get("is_overlay"):
                 continue
-            children.append({**node(child, seen | {child}), "via": {"from_page": page, "target_label": transition_label(t), "transition_id": t.get("transition_id")}})
+            steps = transition_steps(t)
+            children.append({**node(child, seen | {child}), "via": {
+                "from_page": page,
+                "target_label": transition_label(t),
+                "transition_id": t.get("transition_id"),
+                "step_count": len(steps),
+                "steps": steps,
+            }})
         return {"page_name": page, "title": state_title(st, page), "children": children}
     flat = []
     for page, st in states.items():
@@ -599,11 +742,62 @@ def record_same_page_operation(x: int, y: int, manual_label: str = "") -> Dict[s
     return {**refreshed, "message": f"已记录页面内变化：新增 {len(revealed)} 个控件，消失 {len(hidden)} 个控件。"}
 
 
+def record_page_gesture_operation(x: int, y: int, operate: str, effect: str = "", manual_label: str = "") -> Dict[str, Any]:
+    before = capture_state_without_graph_write()
+    graph = load_navigation_graph(config.work_dir)
+    active_state = active_navigation_state(config.work_dir, graph, before["state"])
+    active_page = str(active_state.get("page_name") or "")
+    before_page = before["state"].get("page_name")
+    if before_page != active_page:
+        raise ValueError(f"当前检测页面 {before_page} 与 active_page {active_page} 不一致，请先重新采集或确认当前页面状态后再录制。")
+    hit = hit_test_full_ui_tree(before["root"], int(x), int(y))
+    target = build_semantic_target_from_node(hit, manual_label=manual_label.strip())
+    append_web_history({"event": "page_gesture_operation", "debug": {"operate": operate, "effect": effect, "point": [int(x), int(y)], "hit_node": hit, "needs_manual_label": target.get("needs_manual_label", False)}})
+    if target.get("needs_manual_label"):
+        current = read_current_state(capture=False)
+        return {**current, "needs_manual_label": True, "hit_node": hit, "page_operation_mode": True, "operate": operate, "effect": effect, "message": "命中区域缺少稳定 key/text，请手动填写操作对象描述后再保存。"}
+    before_components = component_summary_from_tree(before["root"])
+    metrics = screen_metrics_from_root(before["root"])
+    execute_gesture_operation(config.device_id, operate, [int(x), int(y)], metrics)
+    time.sleep(1.0)
+    after = capture_state_without_graph_write()
+    if after["state"].get("page_name") != before_page:
+        return {"ok": False, "error": "执行后进入了新页面，请使用页面跳转录制，不要保存为页面内操作。"}
+    after_components = component_summary_from_tree(after["root"])
+    operation_id = page_operation_id(active_page, {**target, "operate": operate, "effect": effect})
+    operation = {
+        "operation_id": operation_id,
+        "created_at": now_iso(),
+        "operate": operate,
+        "target": target,
+        "effect": effect or "same_page_state_changed",
+        "before_signature": components_signature(before_components),
+        "after_signature": components_signature(after_components),
+    }
+    state_entry = graph.setdefault("states", {}).setdefault(active_page, before["state"])
+    state_entry.update(before["state"])
+    ops = state_entry.setdefault("page_operations", [])
+    ops[:] = [op for op in ops if op.get("operation_id") != operation_id]
+    ops.append(operation)
+    upsert_clicked_target_as_candidate(graph, active_page, target, operation_id=operation_id)
+    save_navigation_graph(graph, config.work_dir)
+    refreshed = read_current_state(capture=False)
+    return {**refreshed, "message": f"已记录页面内操作：{operate} / {operation.get('effect')}"}
+
+
 def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = "", manual_label: str = "") -> Dict[str, Any]:
-    current = read_current_state(capture=True)
-    ensure_page_consistency(current)
-    root_json = load_json(config.output_dir / "current_ui_tree.json")
-    annotate(root_json)
+    chain = pending_action_chain()
+    if chain:
+        before = capture_state_without_graph_write()
+        root_json = before["root"]
+        current = state_response_from_capture(root_json, before["state"], load_navigation_graph(config.work_dir), str(chain["from_page"]))
+        from_page = str(chain["from_page"])
+    else:
+        current = read_current_state(capture=True)
+        ensure_page_consistency(current)
+        root_json = load_json(config.output_dir / "current_ui_tree.json")
+        annotate(root_json)
+        from_page = str(current["active_page"])
     hit = hit_test_full_ui_tree(root_json, int(x), int(y))
     target = build_semantic_target_from_node(hit, manual_label=manual_label.strip())
     append_web_history({"event": "tap_point", "debug": {"point": [int(x), int(y)], "hit_node": hit, "needs_manual_label": target.get("needs_manual_label", False)}})
@@ -614,33 +808,49 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
     ctype = str(target.get("component_type") or hit.get("component_type") if hit else "")
     if ctype in {"Toggle", "Switch", "CheckBox", "Checkbox"}:
         target["expect"] = "same_page"
-    graph = load_navigation_graph(config.work_dir)
-    from_page = current["active_page"]
     execute_tap(config.device_id, [int(x), int(y)])
     time.sleep(1.2)
-    after = read_current_state(capture=True)
+    after_capture = capture_state_without_graph_write()
+    after = state_response_from_capture(after_capture["root"], after_capture["state"], load_navigation_graph(config.work_dir), from_page)
     to_page = after["state"]["page_name"]
     graph = load_navigation_graph(config.work_dir)
-    graph.setdefault("states", {})[after["state"]["page_name"]] = after["state"]
     if to_page == from_page:
-        upsert_clicked_target_as_candidate(graph, from_page, target)
-        save_navigation_graph(graph, config.work_dir)
-        refreshed = read_current_state(capture=False)
-        return {**refreshed, "message": "点击后仍停留在当前页面。如该操作用于展开或刷新页面内容，请使用‘录制页面内变化’模式。"}
-    tid = transition_id(from_page, "tap", to_page, target, effect)
+        if ctype in {"Toggle", "Switch", "CheckBox", "Checkbox"}:
+            upsert_clicked_target_as_candidate(graph, from_page, target)
+            save_navigation_graph(graph, config.work_dir)
+            refreshed = read_current_state(capture=False)
+            return {**refreshed, "message": "点击后仍停留在当前页面。如该操作用于展开或刷新页面内容，请使用‘录制页面内变化’模式。"}
+        steps = list(chain.get("steps", [])) if chain else []
+        steps.append(transition_step(target))
+        save_pending_action_chain({
+            "from_page": from_page,
+            "steps": steps,
+            "created_at": chain.get("created_at") if chain else now_iso(),
+            "updated_at": now_iso(),
+        })
+        message = f"已记录第 {len(steps)} 步，继续点击临时菜单/弹层中的目标控件；进入新页面后会保存为一条多步骤跳转。"
+        return state_response_from_capture(after_capture["root"], after_capture["state"], graph, from_page, message=message)
+
+    steps = list(chain.get("steps", [])) if chain else []
+    steps.append(transition_step(target))
+    tid = transition_id_for_steps(from_page, str(to_page), steps, effect)
     transition = {
         "transition_id": tid,
         "from_page": from_page,
         "to_page": to_page,
         "operate": "tap",
-        "target": target,
+        "target": steps[0].get("target") or step_target(target),
+        "steps": steps,
     }
     if effect:
         transition["effect"] = effect
+    graph.setdefault("states", {})[after["state"]["page_name"]] = after["state"]
     add_transition(graph, transition)
-    upsert_clicked_target_as_candidate(graph, from_page, target, transition_id=tid)
+    if steps:
+        upsert_clicked_target_as_candidate(graph, from_page, steps[0].get("target") or target, transition_id=tid)
     save_navigation_graph(graph, config.work_dir)
     save_current_path_session(config.work_dir, to_page)
+    clear_pending_action_chain()
     return read_current_state(capture=False)
 
 
@@ -678,6 +888,17 @@ def api_tap_point(req: TapPointRequest) -> JSONResponse:
 def api_tap_same_page_operation(req: TapSamePageOperationRequest) -> JSONResponse:
     try:
         data = record_same_page_operation(req.x, req.y, manual_label=req.manual_label)
+        if data.get("ok") is False:
+            return JSONResponse(data)
+        return ok_response(**data)
+    except Exception as exc:
+        return error_response(str(exc))
+
+
+@app.post("/api/page_gesture_operation")
+def api_page_gesture_operation(req: PageGestureOperationRequest) -> JSONResponse:
+    try:
+        data = record_page_gesture_operation(req.x, req.y, req.operate, effect=req.effect, manual_label=req.manual_label)
         if data.get("ok") is False:
             return JSONResponse(data)
         return ok_response(**data)
@@ -751,7 +972,7 @@ def bfs_path(graph: Dict[str, Any], target_page: str) -> Optional[List[Dict[str,
 def find_candidate_center_for_target(root_json: Dict[str, Any], target: Dict[str, Any]) -> Optional[List[int]]:
     candidates = extract_navigation_candidates(root_json)
     want_type = str(target.get("type") or "")
-    want_value = str(target.get("value") or "")
+    want_value = str(target.get("value") or target.get("key") or "")
     want_text = str(target.get("text") or target.get("key_description") or target.get("step_prompt") or "")
     for c in candidates:
         ct = c.get("suggested_target") or {}
@@ -838,13 +1059,14 @@ def api_navigate_to_page(req: NavigateToPageRequest) -> JSONResponse:
         if path is None:
             raise ValueError(f"找不到 Pages_root 到 {req.page_name} 的路径")
         for t in path:
-            before = capture_state_without_graph_write()
-            root_json = before["root"]
-            center = find_candidate_center_for_target(root_json, t.get("target") or {})
-            if not center:
-                raise ValueError(f"当前页面找不到可点击控件：{transition_label(t)}。请确认手机当前位于设置首页 Pages_root。")
-            execute_tap(config.device_id, center)
-            time.sleep(1.2)
+            for step in transition_steps(t):
+                before = capture_state_without_graph_write()
+                root_json = before["root"]
+                center = find_candidate_center_for_target(root_json, step.get("target") or {})
+                if not center:
+                    raise ValueError(f"当前界面找不到可点击控件：{transition_steps_label([step])}。请确认手机当前位于正确的起始页面。")
+                execute_tap(config.device_id, center)
+                time.sleep(1.0)
             after = capture_state_without_graph_write()
             if after["state"].get("page_name") != t.get("to_page"):
                 raise ValueError(f"跳转校验失败：期望 {t.get('to_page')}，实际 {after['state'].get('page_name')}")
@@ -1172,7 +1394,8 @@ def api_clear_pending() -> JSONResponse:
         path = pending_transition_path(config.work_dir)
         if path.exists():
             path.unlink()
-        return ok_response(pending=None)
+        clear_pending_action_chain()
+        return ok_response(pending=None, pending_action_chain=None)
     except Exception as exc:
         return error_response(str(exc))
 
