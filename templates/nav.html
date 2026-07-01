@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>设置导航录制 Web 控制台</title>
+  <link rel="stylesheet" href="/static/nav.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>设置导航录制 Web 控制台</h1>
+      <div class="meta">
+        <span>page_name: <b id="pageName">-</b></span>
+        <span>active_nav_state: <b id="activePage">-</b></span>
+        <span>title: <b id="title">-</b></span>
+        <span>pending: <b id="pending">-</b></span>
+      </div>
+      <div id="warning" class="warning hidden"></div>
+      <div id="error" class="error hidden"></div>
+    </div>
+    <div class="actions">
+      <button id="captureBtn">重新采集</button>
+      <button id="backBtn">返回</button>
+      <button id="clearPendingBtn">清空 pending</button>
+      <button id="graphBtn">查看 graph JSON</button>
+      <button id="swipeLeftBtn">横向左滑</button>
+      <button id="swipeRightBtn">横向右滑</button>
+    </div>
+  </header>
+  <div id="loading" class="loading hidden">正在执行，请稍候…</div>
+  <main class="layout">
+    <section class="screenPanel">
+      <div class="screenWrap" id="screenWrap">
+        <img id="screen" alt="current_screen.png" />
+        <div id="overlay" class="overlay"></div>
+      </div>
+    </section>
+    <section class="listPanel">
+      <h2>候选入口</h2>
+      <div id="candidates" class="candidates"></div>
+      <pre id="graphBox" class="graphBox hidden"></pre>
+    </section>
+  </main>
+  <script src="/static/nav.js"></script>
+</body>
+</html>

@@ -2885,6 +2885,39 @@ def prompt_special_target() -> Tuple[str, Dict[str, Any], Optional[str]]:
     return operate, target, effect or None
 
 
+def auto_complete_pending_if_needed(work_dir: Path, graph: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    """网页模式无交互补全 current_pending_transition.json。
+
+    该函数与 complete_pending_if_needed() 保持职责一致，但不会询问 y/n；
+    只要 pending 文件存在，就把当前识别到的 state 作为目标页面写入导航图，
+    然后清空 pending，供 Web 控制台点击候选后自动闭环录制 transition。
+    """
+    path = pending_transition_path(work_dir)
+    if not path.exists():
+        return False
+
+    pending = load_json(path)
+    target = pending.get("target", {})
+    effect = pending.get("effect", "")
+    from_page = pending["from_page"]
+    to_page = state["page_name"]
+    operate = pending.get("operate", "tap")
+    transition = {
+        "transition_id": transition_id(from_page, operate, to_page, target, effect),
+        "from_page": from_page,
+        "to_page": to_page,
+        "operate": operate,
+        "target": target,
+    }
+    if effect:
+        transition["effect"] = effect
+    add_transition(graph, transition)
+    save_navigation_graph(graph, work_dir)
+    save_current_path_session(work_dir, to_page)
+    path.unlink()
+    return True
+
+
 def complete_pending_if_needed(work_dir: Path, graph: Dict[str, Any], state: Dict[str, Any]) -> bool:
     path = pending_transition_path(work_dir)
     if not path.exists():
