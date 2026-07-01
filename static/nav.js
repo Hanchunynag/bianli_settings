@@ -1,6 +1,7 @@
 let state = null;
 let busy = false;
 let highlighted = null;
+let samePageMode = false;
 
 const el = (id) => document.getElementById(id);
 
@@ -41,6 +42,10 @@ function render(data) {
   el('pending').textContent = data.pending ? `${data.pending.from_page} -> ${(data.pending.target || {}).step_prompt || (data.pending.target || {}).value || ''}` : '无';
   el('warning').textContent = data.warning || '';
   el('warning').classList.toggle('hidden', !data.warning);
+  const modeMsg = samePageMode ? '当前模式：录制页面内变化。点击截图后将刷新并合并当前页面内容。' : '';
+  const overlayMsg = data.message || modeMsg || (data.state?.is_overlay ? '当前页面已标记为弹窗页面' : '');
+  el('overlayStatus').textContent = overlayMsg;
+  el('overlayStatus').classList.toggle('hidden', !overlayMsg);
   if (data.screenshot_url) el('screen').src = data.screenshot_url;
   renderCandidates(data.candidates || []);
   el('screen').onload = () => renderOverlay(data.candidates || []);
@@ -112,6 +117,12 @@ function escapeHtml(text) {
 el('captureBtn').onclick = async () => render(await api('/api/capture', { method: 'POST' }));
 el('backBtn').onclick = async () => render(await api('/api/back', { method: 'POST' }));
 el('clearPendingBtn').onclick = async () => { await api('/api/clear_pending', { method: 'POST' }); render(await api('/api/state')); };
+el('markOverlayBtn').onclick = async () => render(await api('/api/mark_current_as_overlay', { method: 'POST' }));
+el('samePageModeBtn').onclick = () => {
+  samePageMode = !samePageMode;
+  el('samePageModeBtn').textContent = samePageMode ? '退出页面内变化模式' : '录制页面内变化';
+  render(state);
+};
 el('swipeLeftBtn').onclick = async () => render(await api('/api/swipe_horizontal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ direction: 'left' }) }));
 el('swipeRightBtn').onclick = async () => render(await api('/api/swipe_horizontal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ direction: 'right' }) }));
 el('graphBtn').onclick = async () => {
@@ -120,5 +131,27 @@ el('graphBtn').onclick = async () => {
   box.textContent = JSON.stringify(data, null, 2);
   box.classList.toggle('hidden');
 };
+el('screen').addEventListener('click', async (ev) => {
+  if (!state?.screen_metrics?.screen_size || busy) return;
+  const rect = el('screen').getBoundingClientRect();
+  const [sw, sh] = state.screen_metrics.screen_size;
+  const x = Math.round((ev.clientX - rect.left) / rect.width * sw);
+  const y = Math.round((ev.clientY - rect.top) / rect.height * sh);
+  const endpoint = samePageMode ? '/api/tap_same_page_operation' : '/api/tap_point';
+  let data = await api(endpoint, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(samePageMode ? { x, y, manual_label: '' } : { x, y, expect: 'new_page', effect: '' })
+  });
+  if (data?.needs_manual_label) {
+    const label = window.prompt(data.message || '请填写该控件的稳定描述');
+    if (label) {
+      data = await api(endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(samePageMode ? { x, y, manual_label: label } : { x, y, expect: 'new_page', effect: '', manual_label: label })
+      });
+    }
+  }
+  render(data);
+});
 window.addEventListener('resize', () => renderOverlay(state?.candidates || []));
 api('/api/state').then(render);
