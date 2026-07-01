@@ -36,7 +36,7 @@ DEFAULT_DEVICE_ID = "68Q0223918000004"
 DEFAULT_WORK_DIR = Path(r"D:\hanchunyang_6_3\AItest")
 PACKAGE_NAME = "com.huawei.hmos.settings"
 MAIN_PAGE_NAME = "com.huawei.hmos.settings.MainAbility"
-LIGHT_PATH_KEYS = ["type", "operate", "value", "key_description", "step_prompt", "scope", "expect", "axis"]
+LIGHT_PATH_KEYS = ["type", "operate", "value", "component_type", "text", "key_description", "step_prompt", "scope", "expect", "axis"]
 NOISE_TEXTS = {"tab_unlock"}
 PRIVACY_VALUE_TEXTS = {"加密"}
 SENSITIVE_KEY_DISPLAY = "(敏感 key 已隐藏)"
@@ -265,7 +265,24 @@ def load_navigation_graph(work_dir: Path) -> Dict[str, Any]:
     return empty_navigation_graph()
 
 
+
+def sanitize_transition_targets(graph: Dict[str, Any]) -> None:
+    """移除正式导航 transition target 中不稳定的坐标定位字段。"""
+    forbidden = {"coordinate_hit", "point", "normalized_point", "fallback_locator"}
+    for transition in graph.get("transitions", []) or []:
+        target = transition.get("target")
+        if not isinstance(target, dict):
+            continue
+        for key in forbidden:
+            target.pop(key, None)
+        if target.get("value") == target.get("bounds_center"):
+            target.pop("value", None)
+        target.pop("bounds_center", None)
+        if target.get("type") in {"bounds", "coordinate", "point", "normalized_point"}:
+            target.pop("type", None)
+
 def save_navigation_graph(graph: Dict[str, Any], work_dir: Path) -> None:
+    sanitize_transition_targets(graph)
     graph["updated_at"] = now_iso()
     save_json(graph, navigation_graph_path(work_dir), "轻量导航状态图")
 
@@ -326,14 +343,27 @@ def state_name_from_title(title: str, overlay: bool = False) -> str:
     return f"{prefix}_{segment}"
 
 
+def detect_overlay_title(root: Node) -> str:
+    """从弹窗范围内提取最像标题的稳定文本。"""
+    dialog_root = detect_dialog_root(root)
+    if not dialog_root:
+        return ""
+    for text in meaningful_texts(dialog_root):
+        value = clean_label(text)
+        if is_stable_text_for_navigation(value) and value not in {"取消", "确定", "安装", "允许", "拒绝"}:
+            return value
+    return next((t for t in meaningful_texts(dialog_root) if is_stable_text_for_navigation(t)), "")
+
+
 def build_navigation_state(root: Node) -> Dict[str, Any]:
     page = page_identity(root)
     dialog_root = detect_dialog_root(root)
     scope_root = dialog_root or root
-    title = page.get("title") or (nearest_label(scope_root) if dialog_root else "")
+    overlay_title = detect_overlay_title(root) if dialog_root else ""
+    title = overlay_title or page.get("title") or (nearest_label(scope_root) if dialog_root else "")
     page_name = state_name_from_title(title or page.get("page_id", "page"), overlay=bool(dialog_root))
     texts = [t for t in meaningful_texts(scope_root) if is_stable_text_for_navigation(t)][:8]
-    return {
+    state = {
         "page_name": page_name,
         "page_description": ("弹窗：" if dialog_root else "") + (title or page_name),
         "last_title": title,
@@ -342,6 +372,9 @@ def build_navigation_state(root: Node) -> Dict[str, Any]:
             "texts_any": texts,
         },
     }
+    if dialog_root:
+        state.update({"state_type": "overlay", "is_overlay": True, "overlay_title": title})
+    return state
 
 
 def target_from_node(node: Node, dialog: bool = False) -> Dict[str, Any]:
@@ -360,6 +393,90 @@ def target_from_node(node: Node, dialog: bool = False) -> Dict[str, Any]:
     if dialog:
         target["scope"] = "dialog"
     return target
+
+
+def node_semantic_summary(node: Node) -> Dict[str, Any]:
+    text = next((t for t in meaningful_texts(node) if is_stable_text_for_navigation(t)), "")
+    key = get_key(node)
+    return {
+        "component_type": get_type(node),
+        "text": text,
+        "key": key if is_stable_key_for_navigation(key) else "",
+        "bounds": get_attr(node, "bounds"),
+        "clickable": to_bool(attrs(node).get("clickable", False)),
+        "enabled": is_enabled(node),
+    }
+
+
+def hit_test_full_ui_tree(root_json: Node, x: int, y: int) -> Optional[Dict[str, Any]]:
+    """在完整 UI 树中用坐标做临时 hit-test，并返回最稳定的原始节点语义。"""
+    screen = screen_metrics_from_root(root_json).get("screen_size") or [0, 0]
+    screen_area = int(screen[0] or 0) * int(screen[1] or 0) if isinstance(screen, list) and len(screen) == 2 else 0
+    container_types = {"Navigation", "NavDestination", "Page", "Root", "RelativeContainer", "Stack"}
+    row_types = {"Row", "ListItem", "Column"}
+    button_types = {"Button"}
+    toggle_types = {"Toggle", "Switch", "CheckBox", "Checkbox"}
+    hits: List[Tuple[Tuple[int, int, int, int, int], Node]] = []
+    for node, depth, _ in walk(root_json):
+        rect = parse_rect(get_attr(node, "bounds"))
+        if not rect["valid"] or not is_visible(node):
+            continue
+        if not (rect["left"] <= x <= rect["right"] and rect["top"] <= y <= rect["bottom"]):
+            continue
+        ctype = get_type(node)
+        clickable = to_bool(attrs(node).get("clickable", False))
+        has_key = is_stable_key_for_navigation(get_key(node))
+        has_text = any(is_stable_text_for_navigation(t) for t in meaningful_texts(node))
+        is_large_container = ctype in container_types or (ctype == "Column" and screen_area and rect["area"] > screen_area * 0.55)
+        if ctype in button_types:
+            semantic_rank = 0
+        elif ctype in toggle_types:
+            semantic_rank = 1
+        elif clickable and ctype in row_types:
+            semantic_rank = 2
+        elif has_key:
+            semantic_rank = 3
+        elif has_text:
+            semantic_rank = 4
+        elif clickable:
+            semantic_rank = 5
+        else:
+            semantic_rank = 6
+        container_penalty = 1 if is_large_container else 0
+        hits.append(((container_penalty, semantic_rank, int(rect["area"]), -depth, 0 if is_enabled(node) else 1), node))
+    if not hits:
+        return None
+    hits.sort(key=lambda item: item[0])
+    return node_semantic_summary(hits[0][1])
+
+
+def build_semantic_target_from_node(hit_node: Optional[Dict[str, Any]], manual_label: str = "") -> Dict[str, Any]:
+    """从 hit-test 命中的节点构造不含坐标的稳定 target。"""
+    if not hit_node:
+        return {"needs_manual_label": True}
+    ctype = str(hit_node.get("component_type") or "")
+    text = clean_label(hit_node.get("text") or "")
+    key = str(hit_node.get("key") or "")
+    if manual_label:
+        return {
+            "type": "manual",
+            "value": manual_label,
+            "component_type": ctype,
+            "key_description": manual_label,
+            "step_prompt": f"点击{manual_label}",
+        }
+    if ctype == "Button":
+        if key:
+            desc = text or key
+            return {"type": "button", "value": key, "component_type": "Button", "text": text, "key_description": desc, "step_prompt": f"点击{desc}按钮"}
+        if text:
+            return {"type": "button_text", "value": text, "component_type": "Button", "key_description": text, "step_prompt": f"点击{text}按钮"}
+    if key:
+        desc = text or key
+        return {"type": "key", "value": key, "component_type": ctype, "text": text, "key_description": desc, "step_prompt": desc}
+    if text:
+        return {"type": "text", "value": text, "component_type": ctype, "key_description": text, "step_prompt": text}
+    return {"needs_manual_label": True, "component_type": ctype}
 
 
 def extract_navigation_candidates(root_json: Node) -> List[Dict[str, Any]]:
