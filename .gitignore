@@ -8,3 +8,7 @@ current_screen.png
 
 *.log
 .DS_Store
+
+.codemate/
+.idea/
+.testagent/
