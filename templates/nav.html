@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>设置导航录制 Web 控制台</title>
+  <link rel="stylesheet" href="/static/nav.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="statusBlock">
+      <h1>设置导航录制 Web 控制台</h1>
+      <div class="meta">
+        <span>page_name: <b id="pageName">-</b></span>
+        <span>active_nav_state: <b id="activePage">-</b></span>
+        <span>title: <b id="title">-</b></span>
+        <span>pending: <b id="pending">-</b></span>
+        <span>mode: <b id="modeLabel">tap</b></span>
+        <span id="coordLabel" class="coord">坐标: -</span>
+      </div>
+      <div id="warning" class="warning hidden"></div>
+      <div id="error" class="error hidden"></div>
+    </div>
+    <div class="actions">
+      <button id="modeTapBtn" class="mode active">点击 tap</button>
+      <button id="modeSwipeLeftBtn" class="mode">左滑 swipe_left</button>
+      <button id="modeSwipeRightBtn" class="mode">右滑 swipe_right</button>
+      <button id="backBtn">返回 back</button>
+      <button id="captureBtn">重新采集 capture</button>
+      <button id="clearPendingBtn">清空 pending</button>
+      <button id="undoBtn">撤销上一步 undo_last</button>
+      <button id="graphBtn">查看 graph JSON</button>
+    </div>
+  </header>
+  <div id="loading" class="loading hidden">正在执行，请稍候…</div>
+  <main class="layout">
+    <section class="screenPanel">
+      <div class="hint">主推荐方式：选择模式后，直接点击截图中的真实操作位置。</div>
+      <div class="screenWrap" id="screenWrap">
+        <img id="screen" alt="current_screen.png" />
+        <div id="overlay" class="overlay"></div>
+      </div>
+    </section>
+    <section class="listPanel">
+      <h2>候选入口（辅助参考）</h2>
+      <div id="candidates" class="candidates"></div>
+      <pre id="graphBox" class="graphBox hidden"></pre>
+    </section>
+  </main>
+  <script src="/static/nav.js"></script>
+</body>
+</html>
