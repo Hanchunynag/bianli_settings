@@ -1,32 +1,31 @@
 import { api, postJson, requestJson } from './nav/api.js';
 import { el } from './nav/dom.js';
 import { store } from './nav/state.js';
-import { render, renderOverlay } from './nav/render.js';
+import { refreshDirectory, render, renderOverlay } from './nav/render.js';
+
+const consoleAction = (action, payload = {}) => postJson('/api/console_action', { action, payload });
+const recordAction = (action, payload = {}) => postJson('/api/record_action', { action, payload });
 
 function bindCommandButtons() {
-  el('captureBtn').onclick = async () => render(await api('/api/capture', { method: 'POST' }));
-  el('backBtn').onclick = async () => render(await api('/api/back', { method: 'POST' }));
-  el('clearPendingBtn').onclick = async () => {
-    await api('/api/clear_pending', { method: 'POST' });
-    render(await api('/api/state'));
-  };
-  el('markOverlayBtn').onclick = async () => render(await api('/api/mark_current_as_overlay', { method: 'POST' }));
-  el('continuePageBtn').onclick = async () => render(await api('/api/continue_current_page', { method: 'POST' }));
-  el('swipeLeftBtn').onclick = async () => render(await postJson('/api/swipe_horizontal', { direction: 'left' }));
-  el('swipeRightBtn').onclick = async () => render(await postJson('/api/swipe_horizontal', { direction: 'right' }));
+  el('captureBtn').onclick = async () => render(await consoleAction('capture_current'));
+  el('backBtn').onclick = async () => render(await consoleAction('system_back'));
+  el('clearPendingBtn').onclick = async () => render(await consoleAction('clear_pending'));
+  el('markOverlayBtn').onclick = async () => render(await consoleAction('mark_overlay'));
+  el('continuePageBtn').onclick = async () => render(await consoleAction('continue_current_page'));
+  el('swipeLeftBtn').onclick = async () => render(await consoleAction('swipe_horizontal', { direction: 'left' }));
+  el('swipeRightBtn').onclick = async () => render(await consoleAction('swipe_horizontal', { direction: 'right' }));
   el('samePageModeBtn').onclick = () => {
     store.samePageMode = !store.samePageMode;
     if (store.samePageMode) store.pageOperationMode = false;
-    el('samePageModeBtn').textContent = store.samePageMode ? '退出页面内变化模式' : '录制页面内变化';
-    el('pageOperationModeBtn').textContent = '录制页面内操作';
+    el('samePageModeBtn').textContent = store.samePageMode ? '停止记录同页点击变化' : '开始记录同页点击变化';
+    el('pageOperationModeBtn').textContent = '开始记录同页手势';
     render(store.data);
   };
   el('pageOperationModeBtn').onclick = () => {
     store.pageOperationMode = !store.pageOperationMode;
     if (store.pageOperationMode) store.samePageMode = false;
-    el('pageOperationModeBtn').textContent = store.pageOperationMode ? '退出页面内操作模式' : '录制页面内操作';
-    el('samePageModeBtn').textContent = '录制页面内变化';
-    el('moreActions').open = false;
+    el('pageOperationModeBtn').textContent = store.pageOperationMode ? '停止记录同页手势' : '开始记录同页手势';
+    el('samePageModeBtn').textContent = '开始记录同页点击变化';
     render(store.data);
   };
   el('graphBtn').onclick = async () => {
@@ -35,10 +34,9 @@ function bindCommandButtons() {
     box.textContent = JSON.stringify(data, null, 2);
     box.classList.toggle('hidden');
   };
-  el('moreActions').addEventListener('click', (event) => {
-    if (event.target.tagName === 'BUTTON') {
-      el('moreActions').open = false;
-    }
+  el('pageSearch').addEventListener('input', (event) => {
+    store.directoryQuery = event.target.value.trim().toLowerCase();
+    refreshDirectory();
   });
 }
 
@@ -49,11 +47,11 @@ function bindScreenRecorder() {
     const [screenWidth, screenHeight] = store.data.screen_metrics.screen_size;
     const x = Math.round((event.clientX - rect.left) / rect.width * screenWidth);
     const y = Math.round((event.clientY - rect.top) / rect.height * screenHeight);
-    const endpoint = store.pageOperationMode
-      ? '/api/page_gesture_operation'
+    const action = store.pageOperationMode
+      ? 'same_page_gesture'
       : store.samePageMode
-        ? '/api/tap_same_page_operation'
-        : '/api/tap_point';
+        ? 'same_page_tap'
+        : 'tap_point';
     const operationBody = {
       x,
       y,
@@ -61,11 +59,11 @@ function bindScreenRecorder() {
       effect: el('operationEffect').value.trim(),
       manual_label: '',
     };
-    let data = await postJson(endpoint, store.pageOperationMode ? operationBody : store.samePageMode ? { x, y, manual_label: '' } : { x, y, expect: 'new_page', effect: '' });
+    let data = await recordAction(action, store.pageOperationMode ? operationBody : store.samePageMode ? { x, y, manual_label: '' } : { x, y, expect: 'new_page', effect: '' });
     if (data?.needs_manual_label) {
       const label = window.prompt(data.message || '请填写该控件的稳定描述');
       if (label) {
-        data = await postJson(endpoint, store.samePageMode
+        data = await recordAction(action, store.samePageMode
           ? { x, y, manual_label: label }
           : store.pageOperationMode
             ? { ...operationBody, manual_label: label }

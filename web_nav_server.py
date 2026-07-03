@@ -30,6 +30,7 @@ from settings_ui_manual_recorder import (
     build_navigation_state,
     build_semantic_target_from_node,
     capture_artifacts,
+    capture_ui_tree_only,
     detect_overlay_title,
     extract_navigation_candidates,
     hit_test_full_ui_tree,
@@ -101,6 +102,28 @@ class NavigateToPageRequest(BaseModel):
 
 class SetActivePageRequest(BaseModel):
     page_name: str
+
+
+class RenamePageRequest(BaseModel):
+    old_page_name: str
+    new_page_name: str
+    new_title: str = ""
+
+
+class ConsoleActionRequest(BaseModel):
+    action: str
+    payload: Optional[Dict[str, Any]] = None
+
+
+class RecordActionRequest(BaseModel):
+    action: str
+    payload: Optional[Dict[str, Any]] = None
+
+
+class DeleteActionRequest(BaseModel):
+    target_type: str
+    payload: Optional[Dict[str, Any]] = None
+    dry_run: bool = True
 
 
 class DeleteBranchRequest(BaseModel):
@@ -287,7 +310,7 @@ def read_current_state(capture: bool, persist_candidates: bool = True) -> Dict[s
     graph = load_navigation_graph(config.work_dir)
     existing_state = graph.get("states", {}).get(state["page_name"], {})
     if isinstance(existing_state, dict):
-        preserve_keys = ["page_operations", "merged_candidates"]
+        preserve_keys = ["page_operations", "page_variants", "merged_candidates"]
         if existing_state.get("is_overlay"):
             preserve_keys.extend(["state_type", "is_overlay", "overlay_parent", "overlay_title", "page_description"])
         state.update({k: existing_state[k] for k in preserve_keys if k in existing_state})
@@ -363,6 +386,15 @@ def capture_state_without_graph_write() -> Dict[str, Any]:
     """采集设备并构建 state，但不写 navigation graph，避免误生成状态。"""
     if not capture_artifacts(config.device_id, config.output_dir):
         raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
+    root_json = load_json(config.output_dir / "current_ui_tree.json")
+    annotate(root_json)
+    return {"root": root_json, "state": build_navigation_state(root_json)}
+
+
+def capture_ui_tree_state_without_graph_write() -> Dict[str, Any]:
+    """只拉取当前 UI tree 并构建 state；用于快速路径执行，不刷新截图。"""
+    if not capture_ui_tree_only(config.device_id, config.output_dir):
+        raise RuntimeError("hdc 拉取 UI 树失败，请检查设备连接、hdc PATH 和授权状态")
     root_json = load_json(config.output_dir / "current_ui_tree.json")
     annotate(root_json)
     return {"root": root_json, "state": build_navigation_state(root_json)}
@@ -515,6 +547,31 @@ def page_operation_id(page_name: str, target: Dict[str, Any]) -> str:
     safe = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in desc).strip("_") or "operation"
     digest = hashlib.sha1(json.dumps([page_name, target.get("type"), target.get("value"), desc], ensure_ascii=False).encode("utf-8")).hexdigest()[:8]
     return f"{page_name}__op__{safe}_{digest}"
+
+
+def page_variant_id(page_name: str, operation: Dict[str, Any], after_signature: str) -> str:
+    payload = [page_name, operation.get("operation_id"), operation.get("effect"), after_signature]
+    digest = hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+    return f"{page_name}__variant__{digest}"
+
+
+def upsert_page_variant(state_entry: Dict[str, Any], operation: Dict[str, Any], revealed: List[Dict[str, Any]], hidden: List[Dict[str, Any]]) -> None:
+    variant = {
+        "variant_id": page_variant_id(str(state_entry.get("page_name") or ""), operation, str(operation.get("after_signature") or "")),
+        "created_at": now_iso(),
+        "trigger_operation_id": operation.get("operation_id"),
+        "trigger": operation.get("target") or {},
+        "operate": operation.get("operate") or "tap",
+        "effect": operation.get("effect") or "same_page_state_changed",
+        "before_signature": operation.get("before_signature"),
+        "after_signature": operation.get("after_signature"),
+        "revealed_candidates": revealed,
+        "hidden_candidates": hidden,
+        "is_mutually_exclusive": bool(revealed and hidden),
+    }
+    variants = state_entry.setdefault("page_variants", [])
+    variants[:] = [item for item in variants if item.get("variant_id") != variant["variant_id"]]
+    variants.append(variant)
 
 
 def merge_revealed_candidates(state_entry: Dict[str, Any], revealed: List[Dict[str, Any]]) -> None:
@@ -733,6 +790,7 @@ def record_same_page_operation(x: int, y: int, manual_label: str = "") -> Dict[s
     ops = state_entry.setdefault("page_operations", [])
     ops[:] = [op for op in ops if op.get("operation_id") != operation_id]
     ops.append(operation)
+    upsert_page_variant(state_entry, operation, revealed, hidden)
     upsert_clicked_target_as_candidate(graph, active_page, target, operation_id=operation_id)
     for item in revealed:
         item.setdefault("candidate_id", candidate_merge_key(item))
@@ -867,6 +925,34 @@ def api_capture() -> JSONResponse:
         return error_response(str(exc))
 
 
+@app.post("/api/console_action")
+def api_console_action(req: ConsoleActionRequest) -> JSONResponse:
+    action = req.action.strip()
+    payload = req.payload or {}
+    try:
+        if action == "capture_current":
+            return api_capture()
+        if action == "system_back":
+            return api_back()
+        if action == "clear_pending":
+            path = pending_transition_path(config.work_dir)
+            if path.exists():
+                path.unlink()
+            clear_pending_action_chain()
+            return ok_response(**read_current_state(capture=False), message="已清空待确认跳转。")
+        if action == "mark_overlay":
+            return api_mark_current_as_overlay()
+        if action == "continue_current_page":
+            return api_continue_current_page()
+        if action == "swipe_horizontal":
+            return api_swipe_horizontal(SwipeHorizontalRequest(direction=str(payload.get("direction") or "")))
+        if action == "navigate_to_page":
+            return api_navigate_to_page(NavigateToPageRequest(page_name=str(payload.get("page_name") or "")))
+        raise ValueError(f"未知控制台动作：{action}")
+    except Exception as exc:
+        return error_response(str(exc))
+
+
 @app.get("/api/state")
 def api_state() -> JSONResponse:
     try:
@@ -902,6 +988,59 @@ def api_page_gesture_operation(req: PageGestureOperationRequest) -> JSONResponse
         if data.get("ok") is False:
             return JSONResponse(data)
         return ok_response(**data)
+    except Exception as exc:
+        return error_response(str(exc))
+
+
+@app.post("/api/record_action")
+def api_record_action(req: RecordActionRequest) -> JSONResponse:
+    action = req.action.strip()
+    payload = req.payload or {}
+    try:
+        if action == "tap_point":
+            data = record_tap_at_point(
+                int(payload.get("x")),
+                int(payload.get("y")),
+                expect=str(payload.get("expect") or "new_page"),
+                effect=str(payload.get("effect") or ""),
+                manual_label=str(payload.get("manual_label") or ""),
+            )
+            return ok_response(**data)
+        if action == "same_page_tap":
+            data = record_same_page_operation(
+                int(payload.get("x")),
+                int(payload.get("y")),
+                manual_label=str(payload.get("manual_label") or ""),
+            )
+            return JSONResponse(data) if data.get("ok") is False else ok_response(**data)
+        if action == "same_page_gesture":
+            data = record_page_gesture_operation(
+                int(payload.get("x")),
+                int(payload.get("y")),
+                str(payload.get("operate") or ""),
+                effect=str(payload.get("effect") or ""),
+                manual_label=str(payload.get("manual_label") or ""),
+            )
+            return JSONResponse(data) if data.get("ok") is False else ok_response(**data)
+        if action == "tap_candidate":
+            current = read_current_state(capture=True)
+            candidates = current["candidates"]
+            index = int(payload.get("index"))
+            if index < 1 or index > len(candidates):
+                raise ValueError(f"候选编号无效：{index}")
+            selected = candidates[index - 1]
+            center = selected.get("bounds_center")
+            if not isinstance(center, list) or len(center) != 2:
+                raise ValueError("候选项缺少 bounds_center，无法作为临时 hit-test 输入")
+            data = record_tap_at_point(
+                int(center[0]),
+                int(center[1]),
+                expect=str(payload.get("expect") or "new_page"),
+                effect=str(payload.get("effect") or ""),
+                manual_label=str(payload.get("manual_label") or ""),
+            )
+            return ok_response(**data)
+        raise ValueError(f"未知录制动作：{action}")
     except Exception as exc:
         return error_response(str(exc))
 
@@ -991,6 +1130,82 @@ def api_page_directory() -> JSONResponse:
         return error_response(str(exc))
 
 
+def validate_page_name_for_rename(page_name: str) -> str:
+    page_name = page_name.strip()
+    if not page_name:
+        raise ValueError("page_name 不能为空")
+    if not page_name.startswith("Pages_"):
+        raise ValueError("page_name 必须以 Pages_ 开头，例如 Pages_WLAN")
+    if any(ch in page_name for ch in ["/", "\\", "\n", "\r", "\t"]):
+        raise ValueError("page_name 不能包含路径分隔符或换行符")
+    return page_name
+
+
+@app.post("/api/rename_page")
+def api_rename_page(req: RenamePageRequest) -> JSONResponse:
+    try:
+        old_name = req.old_page_name.strip()
+        new_name = validate_page_name_for_rename(req.new_page_name)
+        new_title = req.new_title.strip()
+        graph = load_navigation_graph(config.work_dir)
+        states = graph.setdefault("states", {})
+        if old_name not in states:
+            raise ValueError(f"页面不存在：{old_name}")
+        if old_name == "Pages_root" and new_name != old_name:
+            raise ValueError("不允许修改 Pages_root 的 page_name")
+        if new_name != old_name and new_name in states:
+            raise ValueError(f"目标 page_name 已存在：{new_name}")
+
+        backup = backup_graph_file()
+        state = states.pop(old_name)
+        state["page_name"] = new_name
+        if new_title:
+            state["last_title"] = new_title
+            prefix = "弹窗：" if state.get("is_overlay") else ""
+            state["page_description"] = f"{prefix}{new_title}"
+        states[new_name] = state
+
+        if new_name != old_name:
+            for transition in graph.get("transitions", []):
+                if transition.get("from_page") == old_name:
+                    transition["from_page"] = new_name
+                if transition.get("to_page") == old_name:
+                    transition["to_page"] = new_name
+            traversal = graph.setdefault("traversal_config", {})
+            if traversal.get("root_page") == old_name:
+                traversal["root_page"] = new_name
+            if graph.get("main_page_name") == old_name:
+                graph["main_page_name"] = new_name
+
+        save_navigation_graph(graph, config.work_dir)
+
+        session_path = config.work_dir / "outputs" / "navigation" / "current_path_session.json"
+        if session_path.exists():
+            try:
+                session = load_json(session_path)
+            except Exception:
+                session = {}
+            changed = False
+            if session.get("active_page") == old_name:
+                session["active_page"] = new_name
+                changed = True
+            if session.get("base_page") == old_name:
+                session["base_page"] = new_name
+                changed = True
+            if changed:
+                save_json(session, session_path, "当前页面会话")
+
+        return ok_response(
+            page_name=new_name,
+            old_page_name=old_name,
+            new_title=state.get("last_title") or state.get("page_description") or new_name,
+            backup=backup,
+            message=f"已重命名页面：{old_name} -> {new_name}",
+        )
+    except Exception as exc:
+        return error_response(str(exc))
+
+
 @app.get("/api/page_detail")
 def api_page_detail(page_name: str) -> JSONResponse:
     try:
@@ -1000,13 +1215,16 @@ def api_page_detail(page_name: str) -> JSONResponse:
             raise ValueError(f"页面不存在：{page_name}")
         incoming = [t for t in graph.get("transitions", []) if t.get("to_page") == page_name]
         outgoing = [t for t in graph.get("transitions", []) if t.get("from_page") == page_name]
+        path_from_root = [] if page_name == "Pages_root" else (bfs_path(graph, page_name) or [])
         return ok_response(
             page_name=page_name,
             state=state,
+            path_from_root=path_from_root,
             incoming_transitions=incoming,
             outgoing_transitions=outgoing,
             merged_candidates=get_page_merged_candidates(graph, page_name, []),
             page_operations=state.get("page_operations", []) or [],
+            page_variants=state.get("page_variants", []) or [],
             continued_captures=state.get("continued_captures", []) or [],
         )
     except Exception as exc:
@@ -1058,20 +1276,34 @@ def api_navigate_to_page(req: NavigateToPageRequest) -> JSONResponse:
         path = bfs_path(graph, req.page_name)
         if path is None:
             raise ValueError(f"找不到 Pages_root 到 {req.page_name} 的路径")
+        last_capture: Optional[Dict[str, Any]] = None
         for t in path:
+            from_page = str(t.get("from_page") or "")
             for step in transition_steps(t):
-                before = capture_state_without_graph_write()
+                before = capture_ui_tree_state_without_graph_write()
+                last_capture = before
+                detected_page = str(before["state"].get("page_name") or "")
+                if from_page and detected_page != from_page:
+                    raise ValueError(f"无法进入 {req.page_name}：当前检测页面是 {detected_page}，但路径下一步要求位于 {from_page}。请先回到正确起始页。")
                 root_json = before["root"]
                 center = find_candidate_center_for_target(root_json, step.get("target") or {})
                 if not center:
-                    raise ValueError(f"当前界面找不到可点击控件：{transition_steps_label([step])}。请确认手机当前位于正确的起始页面。")
+                    raise ValueError(f"无法进入 {req.page_name}：当前页面找不到路径控件「{transition_steps_label([step])}」。请确认该控件仍存在或重新录制这条路径。")
                 execute_tap(config.device_id, center)
-                time.sleep(1.0)
-            after = capture_state_without_graph_write()
-            if after["state"].get("page_name") != t.get("to_page"):
-                raise ValueError(f"跳转校验失败：期望 {t.get('to_page')}，实际 {after['state'].get('page_name')}")
+                time.sleep(0.5)
+        last_capture = capture_ui_tree_state_without_graph_write()
+        if last_capture["state"].get("page_name") != req.page_name:
+            raise ValueError(f"无法进入 {req.page_name}：最终校验失败，实际位于 {last_capture['state'].get('page_name')}")
         save_current_path_session(config.work_dir, req.page_name)
-        return ok_response(**read_current_state(capture=True))
+        if last_capture:
+            return ok_response(**state_response_from_capture(
+                last_capture["root"],
+                last_capture["state"],
+                graph,
+                req.page_name,
+                message="已按导航图快速跳转：仅拉取 UI 树并解析控件，未重新截图。",
+            ))
+        return ok_response(**read_current_state(capture=False))
     except Exception as exc:
         return error_response(str(exc))
 
@@ -1235,6 +1467,29 @@ def plan_delete_transition(graph: Dict[str, Any], transition_id_value: str, dele
     if delete_orphan_to_state:
         collect_descendant_delete(graph, str(t.get("to_page")), plan, {transition_id_value})
     return plan
+
+
+@app.post("/api/delete_action")
+def api_delete_action(req: DeleteActionRequest) -> JSONResponse:
+    target_type = req.target_type.strip()
+    payload = dict(req.payload or {})
+    payload["dry_run"] = bool(req.dry_run)
+    try:
+        if target_type == "transition":
+            return api_delete_transition(DeleteTransitionRequest(**payload))
+        if target_type == "branch":
+            return api_delete_branch(DeleteBranchRequest(**payload))
+        if target_type == "page":
+            return api_delete_page(DeletePageRequest(**payload))
+        if target_type == "candidate":
+            return api_delete_candidate(DeleteCandidateRequest(**payload))
+        if target_type == "page_operation":
+            return api_delete_page_operation(DeletePageOperationRequest(**payload))
+        if target_type == "continued_capture":
+            return api_delete_continued_capture(DeleteContinuedCaptureRequest(**payload))
+        raise ValueError(f"未知删除目标类型：{target_type}")
+    except Exception as exc:
+        return error_response(str(exc))
 
 
 @app.post("/api/delete_transition")

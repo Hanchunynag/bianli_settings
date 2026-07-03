@@ -87,6 +87,16 @@ def run_cmd(cmd: List[str], cwd: Optional[str] = None, timeout: int = 30) -> boo
     return False
 
 
+def format_ui_tree_json(path: Path) -> None:
+    try:
+        data = load_json(path)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"✓ 格式化 UI JSON: {path}")
+    except Exception as exc:
+        print(f"⚠ UI JSON 格式化失败，继续采集流程: {path} ({exc})")
+
+
 def capture_artifacts(device_id: str, output_dir: Path) -> bool:
     output_dir.mkdir(parents=True, exist_ok=True)
     if not run_cmd(["hdc", "version"]):
@@ -103,6 +113,27 @@ def capture_artifacts(device_id: str, output_dir: Path) -> bool:
         if not run_cmd(cmd, cwd=str(output_dir)):
             print(f"✗ {name} 失败")
             return False
+        if name == "拉取 JSON":
+            format_ui_tree_json(output_dir / "current_ui_tree.json")
+    return True
+
+
+def capture_ui_tree_only(device_id: str, output_dir: Path) -> bool:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if not run_cmd(["hdc", "version"]):
+        print("✗ hdc 不可用，请确认 hdc 已加入 PATH")
+        return False
+    base = ["hdc"] + (["-t", device_id] if device_id else [])
+    commands = [
+        (base + ["shell", "uitest", "dumpLayout", "-p", "/data/local/tmp/current_ui_tree.json"], "dumpLayout"),
+        (base + ["file", "recv", "/data/local/tmp/current_ui_tree.json", "current_ui_tree.json"], "拉取 JSON"),
+    ]
+    for cmd, name in commands:
+        if not run_cmd(cmd, cwd=str(output_dir)):
+            print(f"✗ {name} 失败")
+            return False
+        if name == "拉取 JSON":
+            format_ui_tree_json(output_dir / "current_ui_tree.json")
     return True
 
 
@@ -191,19 +222,14 @@ def save_current_path_session(work_dir: Path, active_page: str, base_page: str =
 
 
 def active_navigation_state(work_dir: Path, graph: Dict[str, Any], detected_state: Dict[str, Any]) -> Dict[str, Any]:
-    path = current_path_session_path(work_dir)
-    if path.exists():
-        try:
-            session = load_json(path)
-            active_page = str(session.get("active_page") or "")
-            state = graph.get("states", {}).get(active_page)
-            if isinstance(state, dict):
-                active = dict(state)
-                if session.get("base_page"):
-                    active["base_page"] = session.get("base_page")
-                return active
-        except Exception:
-            pass
+    # The Web recorder should operate on the page currently visible in the UI
+    # tree. Historical session state is still saved for path bookkeeping, but it
+    # must not override the detected page shown in the current screenshot.
+    state = graph.get("states", {}).get(detected_state.get("page_name", ""))
+    if isinstance(state, dict):
+        active = dict(state)
+        active.update(detected_state)
+        return active
     return detected_state
 
 
@@ -400,20 +426,42 @@ def nearest_label(node: Node) -> str:
     return ""
 
 
+def is_status_bar_noise_text(text: str) -> bool:
+    if text in NOISE_TEXTS:
+        return True
+    if re.fullmatch(r"\d+", text):
+        return True
+    if re.fullmatch(r"\d{1,2}:\d{2}", text):
+        return True
+    if re.fullmatch(r"\d+%", text):
+        return True
+    if re.fullmatch(r"[\d.]+\s*[KMG]?B/s", text, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def is_page_title_candidate(node: Node) -> bool:
+    if get_type(node) != "Text" or not is_visible(node):
+        return False
+    text = clean_label(get_text(node))
+    if not text or is_status_bar_noise_text(text):
+        return False
+    rect = parse_rect(get_attr(node, "bounds"))
+    return bool(rect["valid"] and 100 <= rect["top"] <= 250)
+
+
 def find_page_title(root: Node) -> str:
     for node, _, _ in walk(root):
         key = get_key(node)
         text = get_text(node)
         if key == "page.title_id" and text:
             return clean_label(text)
-    title_candidates: List[Tuple[int, str]] = []
+    title_candidates: List[Tuple[int, int, str]] = []
     for node, depth, _ in walk(root):
-        if get_type(node) == "Text" and is_visible(node):
-            text = clean_label(get_text(node))
+        if is_page_title_candidate(node):
             rect = parse_rect(get_attr(node, "bounds"))
-            if text and rect["valid"] and rect["top"] <= 220:
-                title_candidates.append((depth, text))
-    return title_candidates[-1][1] if title_candidates else ""
+            title_candidates.append((int(rect["top"]), depth, clean_label(get_text(node))))
+    return sorted(title_candidates)[0][2] if title_candidates else ""
 
 
 def find_nav_destination_key(root: Node) -> str:

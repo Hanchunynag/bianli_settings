@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>设置导航录制 Web 控制台</title>
-  <link rel="stylesheet" href="/static/nav.css" />
+  <link rel="stylesheet" href="../static/nav.css" />
 </head>
 <body>
   <header class="topbar">
@@ -12,30 +12,30 @@
       <h1>设置导航录制 Web 控制台</h1>
       <div class="meta">
         <span>page_name: <b id="pageName">-</b></span>
-        <span>active_nav_state: <b id="activePage">-</b></span>
+        <span>current_page: <b id="activePage">-</b></span>
         <span>title: <b id="title">-</b></span>
         <span>pending: <b id="pending">-</b></span>
       </div>
+    </div>
+    <div class="noticePanel">
       <div id="warning" class="warning hidden"></div>
       <div id="overlayStatus" class="warning hidden"></div>
       <div id="error" class="error hidden"></div>
     </div>
     <div class="actions">
-      <div class="primaryActions">
-        <button id="captureBtn" class="primary">重新采集</button>
-        <button id="backBtn">返回</button>
-        <button id="samePageModeBtn">录制页面内变化</button>
-      </div>
-      <details id="moreActions" class="moreActions">
-        <summary>更多操作</summary>
-        <div class="morePanel">
+      <button id="captureBtn" class="primary">采集当前界面</button>
+      <button id="backBtn">系统返回</button>
+      <details id="controlDrawer" class="controlDrawer">
+        <summary>操作控制台</summary>
+        <div id="moreActions" class="morePanel">
           <div class="actionGroup">
-            <div class="actionGroupTitle">页面</div>
-            <button id="continuePageBtn" class="secondary">继续录制当前页面</button>
-            <button id="markOverlayBtn" class="secondary">标记弹窗</button>
+            <div class="actionGroupTitle">当前页面采集</div>
+            <button id="continuePageBtn" class="secondary">补采当前页控件</button>
+            <button id="samePageModeBtn" class="secondary">开始记录同页点击变化</button>
+            <button id="markOverlayBtn" class="secondary">将当前页标记为弹窗</button>
           </div>
           <div class="actionGroup">
-            <div class="actionGroupTitle">页面内操作</div>
+            <div class="actionGroupTitle">同页手势记录</div>
             <select id="operationGesture" class="actionInput">
               <option value="swipe_left">左滑</option>
               <option value="swipe_right">右滑</option>
@@ -44,18 +44,18 @@
               <option value="tap">点击</option>
               <option value="long_press">长按</option>
             </select>
-            <input id="operationEffect" class="actionInput" placeholder="效果，如：切换下一个主题" />
-            <button id="pageOperationModeBtn" class="secondary">录制页面内操作</button>
+            <input id="operationEffect" class="actionInput" placeholder="变化结果" />
+            <button id="pageOperationModeBtn" class="secondary">开始记录同页手势</button>
           </div>
           <div class="actionGroup">
             <div class="actionGroupTitle">横向视图</div>
-            <button id="swipeLeftBtn" class="secondary">横向左滑</button>
-            <button id="swipeRightBtn" class="secondary">横向右滑</button>
+            <button id="swipeLeftBtn" class="secondary">记录横向左滑视图</button>
+            <button id="swipeRightBtn" class="secondary">记录横向右滑视图</button>
           </div>
           <div class="actionGroup">
             <div class="actionGroupTitle">维护</div>
-            <button id="clearPendingBtn" class="secondary">清空 pending</button>
-            <button id="graphBtn" class="secondary">查看 graph JSON</button>
+            <button id="clearPendingBtn" class="secondary">清空待确认跳转</button>
+            <button id="graphBtn" class="secondary">查看导航图 JSON</button>
           </div>
         </div>
       </details>
@@ -63,28 +63,33 @@
   </header>
   <div id="loading" class="loading hidden">正在执行，请稍候…</div>
   <main class="layout">
+    <section class="panel screenPanel">
+      <div class="panelHeader screenHeader">
+        <h2>当前截图</h2>
+      </div>
+      <div class="screenStage">
+        <div class="screenWrap" id="screenWrap">
+          <img id="screen" alt="current_screen.png" />
+          <div id="overlay" class="overlay"></div>
+        </div>
+      </div>
+    </section>
     <section class="panel directoryPanel">
-      <div class="panelHeader">
-        <h2>页面目录</h2>
+      <div class="panelHeader directoryHeader">
+        <h2>页面目录 <span id="directoryCount" class="countBadge">0</span></h2>
+        <input id="pageSearch" class="searchInput" placeholder="搜索页面或 page_name" />
       </div>
       <div id="pageDirectory" class="directory"></div>
-      <div id="pageDetail" class="pageDetail"></div>
-    </section>
-    <section class="panel screenPanel">
-      <div class="screenWrap" id="screenWrap">
-        <img id="screen" alt="current_screen.png" />
-        <div id="overlay" class="overlay"></div>
-      </div>
     </section>
     <section class="panel listPanel">
       <div class="panelHeader">
-        <h2>可达页面</h2>
+        <h2>页面详情 / 可达页面</h2>
       </div>
+      <div id="pageDetail" class="pageDetail"></div>
       <div id="chainStatus" class="chainStatus hidden"></div>
-      <div id="reachablePages" class="reachablePages"></div>
       <pre id="graphBox" class="graphBox hidden"></pre>
     </section>
   </main>
-  <script type="module" src="/static/nav.js"></script>
+  <script type="module" src="../static/nav.js"></script>
 </body>
 </html>

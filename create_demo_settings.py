@@ -3,6 +3,7 @@
 """生成 Web 导航录制器的模拟设置页面数据。"""
 
 import json
+import re
 import struct
 import zlib
 from pathlib import Path
@@ -172,101 +173,171 @@ def operation(oid, operate, name, key, effect, component_type="Card"):
     }
 
 
+def page_name_for(title, used):
+    if title == "设置":
+        return "Pages_root"
+    safe = re.sub(r"\s+", "_", title)
+    safe = re.sub(r"[^\w\u4e00-\u9fff]+", "_", safe).strip("_") or "page"
+    base = f"Pages_{safe}"
+    page = base
+    index = 2
+    while page in used:
+        page = f"{base}_{index}"
+        index += 1
+    used.add(page)
+    return page
+
+
+def key_for(*parts):
+    text = ".".join(str(part) for part in parts if str(part))
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", ".", text).strip(".")
+    return f"settings.demo.{text}"
+
+
+def candidate(name, key, transition_ids=None, component_type="ListItem"):
+    transition_ids = transition_ids or []
+    return {
+        "candidate_id": f"key::{key}",
+        "type": "key",
+        "value": key,
+        "component_type": component_type,
+        "text": name,
+        "key": key,
+        "key_description": name,
+        "step_prompt": name,
+        "source": "demo_generated",
+        "transition_ids": transition_ids,
+        "operation_ids": [],
+    }
+
+
+def add_state(states, page_name, title):
+    states[page_name] = state(page_name, title)
+
+
+def add_transition_record(graph, from_page, to_page, name, key, component_type="ListItem"):
+    tid = f"{from_page}__to__{to_page}"
+    graph["transitions"].append(transition(tid, from_page, to_page, [step(name, key, component_type)]))
+    graph["states"][from_page].setdefault("merged_candidates", []).append(candidate(name, key, [tid], component_type))
+
+
+def settings_catalog():
+    return [
+        ("WLAN", ["当前连接网络 HanHome-5G", "已保存的网络", "添加网络", "WLAN 助手", "更多设置", "WLAN 更多信息"]),
+        ("蓝牙", ["已配对设备", "可用设备", "设备名称", "蓝牙共享", "高级设置", "耳机音频编码"]),
+        ("移动网络", ["SIM 卡管理", "移动数据", "个人热点", "流量管理", "网络模式", "VoLTE 高清通话"]),
+        ("连接与共享", ["飞行模式", "NFC", "投屏", "打印", "VPN", "私人 DNS"]),
+        ("桌面和个性化", ["桌面设置", "图标风格", "壁纸", "主题", "杂志锁屏", "息屏显示"]),
+        ("显示和亮度", ["亮度", "护眼模式", "深色模式", "字体大小", "屏幕刷新率", "应用全屏显示"]),
+        ("声音和振动", ["来电铃声", "通知铃声", "振动强度", "免打扰", "系统反馈音", "更多声音设置"]),
+        ("通知和状态栏", ["应用通知管理", "锁屏通知", "横幅通知", "状态栏图标", "通知勿扰", "角标管理"]),
+        ("应用", ["应用管理", "默认应用", "权限管理", "应用启动管理", "应用分身", "特殊访问权限"]),
+        ("电池", ["电量使用情况", "省电模式", "超级省电", "电池健康", "更多电池设置", "无线反向充电"]),
+        ("存储", ["清理加速", "应用占用", "图片和视频", "文件管理", "云空间", "存储设置"]),
+        ("安全", ["锁屏密码", "指纹", "人脸识别", "支付保护中心", "查找设备", "更多安全设置"]),
+        ("隐私", ["权限使用记录", "隐私空间", "广告与隐私", "剪贴板提醒", "定位权限", "隐私保护中心"]),
+        ("位置服务", ["访问我的位置信息", "应用位置权限", "系统服务", "提高精确度", "最近位置请求", "位置信息共享"]),
+        ("健康使用手机", ["屏幕时间", "应用限额", "停用时间", "内容访问限制", "睡眠时间", "家庭守护"]),
+        ("辅助功能", ["无障碍", "单手模式", "快捷启动及手势", "智慧多窗", "防误触模式", "悬浮导航"]),
+        ("用户和账户", ["华为帐号", "云空间", "付款与账单", "自动同步数据", "添加账户", "家庭共享"]),
+        ("系统和更新", ["软件更新", "系统导航方式", "语言和输入法", "日期和时间", "备份和恢复", "重置"]),
+        ("关于手机", ["设备名称", "型号", "HarmonyOS 版本", "状态信息", "法律信息", "认证标志"]),
+        ("智慧助手", ["智慧语音", "智慧视觉", "智慧识屏", "今天", "场景建议", "实验室功能"]),
+    ]
+
+
+def build_large_settings_graph():
+    graph = {
+        "package_name": "com.huawei.hmos.settings",
+        "main_page_name": "com.huawei.hmos.settings.MainAbility",
+        "updated_at": "2026-07-01T00:00:00",
+        "traversal_config": {
+            "strategy": "dfs",
+            "root_page": "Pages_root",
+            "default_return_policy": {"type": "system_back"},
+        },
+        "states": {},
+        "transitions": [],
+    }
+    used = {"Pages_root"}
+    add_state(graph["states"], "Pages_root", "设置")
+    catalog = settings_catalog()
+    title_to_page = {"设置": "Pages_root"}
+
+    for category_index, (category, children) in enumerate(catalog, start=1):
+        category_page = page_name_for(category, used)
+        title_to_page[category] = category_page
+        add_state(graph["states"], category_page, category)
+        add_transition_record(graph, "Pages_root", category_page, category, key_for("root", category_index, category))
+
+        for child_index, child in enumerate(children, start=1):
+            child_page = page_name_for(child, used)
+            title_to_page[f"{category}/{child}"] = child_page
+            add_state(graph["states"], child_page, child)
+            add_transition_record(graph, category_page, child_page, child, key_for(category_index, child_index, child))
+
+            if child_index in {1, 2}:
+                detail_title = f"{child}详情"
+                detail_page = page_name_for(detail_title, used)
+                add_state(graph["states"], detail_page, detail_title)
+                add_transition_record(graph, child_page, detail_page, detail_title, key_for(category_index, child_index, "detail", child))
+
+    wlan_page = title_to_page["WLAN"]
+    saved_page = title_to_page["WLAN/已保存的网络"]
+    wlan_more_page = title_to_page["WLAN/WLAN 更多信息"]
+    graph["states"][wlan_page]["merged_candidates"] = [
+        candidate("WLAN 开关", "wifi.master.switch", [], "Button"),
+        candidate("右上角更多按钮", "wifi.more.button", ["wlan_to_more_info"], "Button"),
+        candidate("已保存的网络", "wifi.saved.networks", ["wlan_to_saved_networks"]),
+    ] + graph["states"][wlan_page].get("merged_candidates", [])
+    graph["transitions"].extend([
+        transition("wlan_to_more_info", wlan_page, wlan_more_page, [
+            step("右上角更多按钮", "wifi.more.button", "Button"),
+            step("弹出菜单：更多信息", "wifi.more.info.menu_item", "MenuItem"),
+        ]),
+        transition("wlan_to_saved_networks", wlan_page, saved_page, [step("已保存的网络", "wifi.saved.networks")]),
+    ])
+
+    themes_page = title_to_page["桌面和个性化/主题"]
+    graph["states"][themes_page]["page_operations"] = [
+        operation("themes_card_swipe_left", "swipe_left", "当前主题卡片", "theme.current.card", "select_next_theme"),
+        operation("themes_card_swipe_up", "swipe_up", "当前主题卡片", "theme.current.card", "delete_theme"),
+    ]
+    graph["states"][themes_page].setdefault("merged_candidates", []).append({
+        "candidate_id": "key::theme.current.card",
+        "type": "key",
+        "value": "theme.current.card",
+        "component_type": "Card",
+        "text": "晨雾主题",
+        "key": "theme.current.card",
+        "key_description": "当前主题卡片",
+        "step_prompt": "当前主题卡片",
+        "source": "demo_generated",
+        "transition_ids": [],
+        "operation_ids": ["themes_card_swipe_left", "themes_card_swipe_up"],
+    })
+
+    for page_name, st in graph["states"].items():
+        incoming = sum(1 for t in graph["transitions"] if t.get("to_page") == page_name)
+        outgoing = sum(1 for t in graph["transitions"] if t.get("from_page") == page_name)
+        st["incoming_count"] = incoming
+        st["outgoing_count"] = outgoing
+        st["candidate_count"] = len(st.get("merged_candidates", []) or [])
+    return graph, themes_page
+
+
 def main():
     LATEST_DIR.mkdir(parents=True, exist_ok=True)
     NAV_DIR.mkdir(parents=True, exist_ok=True)
     (LATEST_DIR / "current_ui_tree.json").write_text(json.dumps(themes_tree(), ensure_ascii=False, indent=2), encoding="utf-8")
     png(LATEST_DIR / "current_screen.png")
 
-    graph = {
-        "package_name": "com.huawei.hmos.settings",
-        "main_page_name": "com.huawei.hmos.settings.MainAbility",
-        "updated_at": "2026-07-01T00:00:00",
-        "states": {
-            "Pages_root": state("Pages_root", "设置", candidates=4, outgoing=4),
-            "Pages_WLAN": state("Pages_WLAN", "WLAN", candidates=5, incoming=1, outgoing=3),
-            "Pages_WLAN_更多信息": state("Pages_WLAN_更多信息", "WLAN 更多信息", candidates=3, incoming=1),
-            "Pages_已保存的网络": state("Pages_已保存的网络", "已保存的网络", candidates=2, incoming=1),
-            "Pages_蓝牙": state("Pages_蓝牙", "蓝牙", candidates=4, incoming=1),
-            "Pages_应用": state("Pages_应用", "应用", candidates=5, incoming=1),
-            "Pages_主题": state("Pages_主题", "主题", candidates=2, incoming=1),
-        },
-        "transitions": [
-            transition("root_to_wlan", "Pages_root", "Pages_WLAN", [step("WLAN", "settings.entry.wlan")]),
-            transition("root_to_bluetooth", "Pages_root", "Pages_蓝牙", [step("蓝牙", "settings.entry.bluetooth")]),
-            transition("root_to_apps", "Pages_root", "Pages_应用", [step("应用", "settings.entry.apps")]),
-            transition("root_to_themes", "Pages_root", "Pages_主题", [step("主题", "settings.entry.themes")]),
-            transition("wlan_to_more_info", "Pages_WLAN", "Pages_WLAN_更多信息", [
-                step("右上角更多按钮", "wifi.more.button", "Button"),
-                step("弹出菜单：更多信息", "wifi.more.info.menu_item", "MenuItem"),
-            ]),
-            transition("wlan_to_saved_networks", "Pages_WLAN", "Pages_已保存的网络", [step("已保存的网络", "wifi.saved.networks")]),
-            transition("wlan_to_network_detail", "Pages_WLAN", "Pages_WLAN_更多信息", [step("当前连接网络 HanHome-5G", "wifi.connected.network")]),
-        ],
-    }
-    graph["states"]["Pages_WLAN"]["merged_candidates"] = [
-        {
-            "candidate_id": "key::wifi.master.switch",
-            "type": "key",
-            "value": "wifi.master.switch",
-            "component_type": "Button",
-            "text": "开",
-            "key": "wifi.master.switch",
-            "key_description": "WLAN 开关",
-            "step_prompt": "点击 WLAN 开关",
-            "source": "auto_detected",
-            "transition_ids": [],
-            "operation_ids": [],
-        },
-        {
-            "candidate_id": "key::wifi.more.button",
-            "type": "key",
-            "value": "wifi.more.button",
-            "component_type": "Button",
-            "text": "更多",
-            "key": "wifi.more.button",
-            "key_description": "右上角更多按钮",
-            "step_prompt": "右上角更多按钮",
-            "source": "auto_detected",
-            "transition_ids": ["wlan_to_more_info"],
-            "operation_ids": [],
-        },
-        {
-            "candidate_id": "key::wifi.saved.networks",
-            "type": "key",
-            "value": "wifi.saved.networks",
-            "component_type": "ListItem",
-            "text": "已保存的网络",
-            "key": "wifi.saved.networks",
-            "key_description": "已保存的网络",
-            "step_prompt": "已保存的网络",
-            "source": "auto_detected",
-            "transition_ids": ["wlan_to_saved_networks"],
-            "operation_ids": [],
-        },
-    ]
-    graph["states"]["Pages_主题"]["page_operations"] = [
-        operation("themes_card_swipe_left", "swipe_left", "当前主题卡片", "theme.current.card", "select_next_theme"),
-        operation("themes_card_swipe_up", "swipe_up", "当前主题卡片", "theme.current.card", "delete_theme"),
-    ]
-    graph["states"]["Pages_主题"]["merged_candidates"] = [
-        {
-            "candidate_id": "key::theme.current.card",
-            "type": "key",
-            "value": "theme.current.card",
-            "component_type": "Card",
-            "text": "晨雾主题",
-            "key": "theme.current.card",
-            "key_description": "当前主题卡片",
-            "step_prompt": "当前主题卡片",
-            "source": "auto_detected",
-            "transition_ids": [],
-            "operation_ids": ["themes_card_swipe_left", "themes_card_swipe_up"],
-        }
-    ]
+    graph, active_page = build_large_settings_graph()
     save_navigation_graph(graph, DEMO_DIR)
-    (NAV_DIR / "current_path_session.json").write_text(json.dumps({"active_page": "Pages_主题"}, ensure_ascii=False, indent=2), encoding="utf-8")
+    (NAV_DIR / "current_path_session.json").write_text(json.dumps({"active_page": active_page}, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"demo data written to {DEMO_DIR}")
+    print(f"states={len(graph['states'])}, transitions={len(graph['transitions'])}")
 
 
 if __name__ == "__main__":

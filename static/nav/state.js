@@ -5,6 +5,7 @@ export const store = {
   samePageMode: false,
   pageOperationMode: false,
   selectedPage: null,
+  directoryQuery: '',
 };
 
 export function currentCandidates() {
