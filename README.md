@@ -21,6 +21,14 @@ requirements.txt                  Python 依赖
 demo_settings/                    模拟数据和输出
 ```
 
+## 后续开发指南
+
+如果要继续开发新功能，例如录制弹窗、根据录制好的 JSON 自动遍历，请先阅读：
+
+```text
+docs/development_guide.md
+```
+
 ## 启动 Demo
 
 ```bash
