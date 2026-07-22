@@ -46,6 +46,7 @@ from settings_ui_manual_recorder import (
     save_json,
     save_navigation_graph,
     screen_metrics_from_root,
+    state_name_from_title,
     walk,
     transition_id,
 )
@@ -296,6 +297,173 @@ def warning_for_state(graph: Dict[str, Any], state: Dict[str, Any]) -> str:
     return ""
 
 
+def state_raw_page_name(state: Dict[str, Any], page_name: str = "") -> str:
+    """返回不受父路径影响、仅由当前页面标题生成的页面身份。"""
+    raw_name = str(state.get("raw_page_name") or "").strip()
+    if raw_name:
+        return raw_name
+    title = str(state.get("last_title") or "").strip()
+    if title:
+        return state_name_from_title(title, overlay=bool(state.get("is_overlay")))
+    return str(state.get("page_name") or page_name or "").strip()
+
+
+def state_display_title(state: Dict[str, Any], page_name: str = "") -> str:
+    title = str(state.get("last_title") or state.get("page_description") or "").strip()
+    title = title.removeprefix("弹窗：")
+    if title:
+        return title
+    if page_name == "Pages_root":
+        return "设置"
+    return page_name.removeprefix("Pages_").removeprefix("Overlay_") or "page"
+
+
+def current_session_page() -> str:
+    path = config.work_dir / "outputs" / "navigation" / "current_path_session.json"
+    if not path.exists():
+        return ""
+    try:
+        return str(load_json(path).get("active_page") or "")
+    except Exception:
+        return ""
+
+
+def copy_stored_page_context(
+    detected_state: Dict[str, Any],
+    stored_state: Dict[str, Any],
+    page_name: str,
+) -> Dict[str, Any]:
+    state = dict(detected_state)
+    state["page_name"] = page_name
+    state["raw_page_name"] = state_raw_page_name(detected_state)
+    for key in (
+        "parent_page",
+        "parent_title",
+        "page_description",
+        "state_type",
+        "is_overlay",
+        "overlay_parent",
+        "overlay_title",
+    ):
+        if key in stored_state:
+            state[key] = stored_state[key]
+    return state
+
+
+def resolve_detected_state(
+    graph: Dict[str, Any],
+    detected_state: Dict[str, Any],
+    preferred_page: str = "",
+) -> Dict[str, Any]:
+    """将 UI Tree 的标题级名称恢复成导航图中的上下文名称。"""
+    state = dict(detected_state)
+    raw_name = state_raw_page_name(state)
+    state["raw_page_name"] = raw_name
+    current_name = str(state.get("page_name") or "")
+    if current_name and current_name != raw_name and state.get("parent_page"):
+        return state
+    if raw_name == "Pages_root":
+        state["page_name"] = "Pages_root"
+        return state
+
+    states = graph.get("states", {})
+    preferred_state = states.get(preferred_page, {}) if preferred_page else {}
+    if (
+        isinstance(preferred_state, dict)
+        and state_raw_page_name(preferred_state, preferred_page) == raw_name
+    ):
+        return copy_stored_page_context(state, preferred_state, preferred_page)
+
+    matches = []
+    for page_name, stored_state in states.items():
+        if not isinstance(stored_state, dict):
+            continue
+        if state_raw_page_name(stored_state, str(page_name)) == raw_name:
+            matches.append((str(page_name), stored_state))
+    if len(matches) == 1:
+        return copy_stored_page_context(state, matches[0][1], matches[0][0])
+    return state
+
+
+def states_represent_same_page(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    left_raw = state_raw_page_name(left)
+    return bool(left_raw and left_raw == state_raw_page_name(right))
+
+
+def state_matches_graph_page(
+    graph: Dict[str, Any],
+    detected_state: Dict[str, Any],
+    page_name: str,
+) -> bool:
+    expected_state = graph.get("states", {}).get(page_name, {"page_name": page_name})
+    return states_represent_same_page(detected_state, expected_state)
+
+
+def rename_graph_page(graph: Dict[str, Any], old_name: str, new_name: str) -> None:
+    """把同一父页面下的旧标题级节点迁移成上下文节点。"""
+    if not old_name or old_name == new_name:
+        return
+    states = graph.setdefault("states", {})
+    if old_name not in states or new_name in states:
+        return
+    state = states.pop(old_name)
+    state["page_name"] = new_name
+    states[new_name] = state
+    for transition in graph.get("transitions", []):
+        if transition.get("from_page") == old_name:
+            transition["from_page"] = new_name
+        if transition.get("to_page") == old_name:
+            transition["to_page"] = new_name
+
+
+def contextualize_child_state(
+    graph: Dict[str, Any],
+    from_page: str,
+    detected_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """根据父页面标题与子页面标题生成 Pages_<父>to<子>。"""
+    state = dict(detected_state)
+    raw_name = state_raw_page_name(state)
+    if raw_name == "Pages_root":
+        state["page_name"] = "Pages_root"
+        state["raw_page_name"] = "Pages_root"
+        return state
+
+    parent_state = graph.get("states", {}).get(from_page, {"page_name": from_page})
+    parent_title = state_display_title(parent_state, from_page)
+    child_title = state_display_title(state, raw_name)
+    contextual_name = state_name_from_title(
+        f"{parent_title}to{child_title}",
+        overlay=bool(state.get("is_overlay")),
+    )
+
+    matching_children = []
+    for transition in graph.get("transitions", []):
+        if transition.get("from_page") != from_page:
+            continue
+        child_name = str(transition.get("to_page") or "")
+        child_state = graph.get("states", {}).get(child_name, {})
+        if (
+            isinstance(child_state, dict)
+            and state_raw_page_name(child_state, child_name) == raw_name
+        ):
+            matching_children.append(child_name)
+    if len(matching_children) == 1 and matching_children[0] != contextual_name:
+        rename_graph_page(graph, matching_children[0], contextual_name)
+
+    existing_state = graph.get("states", {}).get(contextual_name, {})
+    if isinstance(existing_state, dict) and existing_state:
+        state = copy_stored_page_context(state, existing_state, contextual_name)
+    state.update({
+        "page_name": contextual_name,
+        "raw_page_name": raw_name,
+        "parent_page": from_page,
+        "parent_title": parent_title,
+        "page_description": f"{parent_title} -> {child_title}",
+    })
+    return state
+
+
 def read_current_state(capture: bool, persist_candidates: bool = True) -> Dict[str, Any]:
     """采集或读取 latest 文件，更新导航图状态并返回前端需要的数据。"""
     if capture and not capture_artifacts(config.device_id, config.output_dir):
@@ -308,6 +476,7 @@ def read_current_state(capture: bool, persist_candidates: bool = True) -> Dict[s
     annotate(root_json)
     state = build_navigation_state(root_json)
     graph = load_navigation_graph(config.work_dir)
+    state = resolve_detected_state(graph, state, current_session_page())
     existing_state = graph.get("states", {}).get(state["page_name"], {})
     if isinstance(existing_state, dict):
         preserve_keys = ["page_operations", "page_variants", "merged_candidates"]
@@ -347,6 +516,7 @@ def state_response_from_capture(
     active_page: str,
     message: str = "",
 ) -> Dict[str, Any]:
+    state = resolve_detected_state(graph, state, active_page)
     candidates = extract_navigation_candidates(root_json)
     return {
         "state": state,
@@ -388,7 +558,10 @@ def capture_state_without_graph_write() -> Dict[str, Any]:
         raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
     root_json = load_json(config.output_dir / "current_ui_tree.json")
     annotate(root_json)
-    return {"root": root_json, "state": build_navigation_state(root_json)}
+    state = build_navigation_state(root_json)
+    graph = load_navigation_graph(config.work_dir)
+    state = resolve_detected_state(graph, state, current_session_page())
+    return {"root": root_json, "state": state}
 
 
 def capture_ui_tree_state_without_graph_write() -> Dict[str, Any]:
@@ -397,7 +570,10 @@ def capture_ui_tree_state_without_graph_write() -> Dict[str, Any]:
         raise RuntimeError("hdc 拉取 UI 树失败，请检查设备连接、hdc PATH 和授权状态")
     root_json = load_json(config.output_dir / "current_ui_tree.json")
     annotate(root_json)
-    return {"root": root_json, "state": build_navigation_state(root_json)}
+    state = build_navigation_state(root_json)
+    graph = load_navigation_graph(config.work_dir)
+    state = resolve_detected_state(graph, state, current_session_page())
+    return {"root": root_json, "state": state}
 
 
 def candidate_merge_key(candidate: Dict[str, Any]) -> str:
@@ -964,7 +1140,7 @@ def record_same_page_operation(x: int, y: int, manual_label: str = "") -> Dict[s
     time.sleep(1.2)
     after = capture_state_without_graph_write()
     after_page = after["state"].get("page_name")
-    if after_page != before_page:
+    if not states_represent_same_page(after["state"], before["state"]):
         return {"ok": False, "error": "点击后进入了新页面，请使用页面跳转录制模式，不要使用页面内变化模式。"}
     after_components = component_summary_from_tree(after["root"])
     before_keys = {candidate_merge_key(c) for c in before_components if candidate_merge_key(c)}
@@ -1023,7 +1199,7 @@ def record_page_gesture_operation(x: int, y: int, operate: str, effect: str = ""
     execute_gesture_operation(config.device_id, operate, [int(x), int(y)], metrics)
     time.sleep(1.0)
     after = capture_state_without_graph_write()
-    if after["state"].get("page_name") != before_page:
+    if not states_represent_same_page(after["state"], before["state"]):
         return {"ok": False, "error": "执行后进入了新页面，请使用页面跳转录制，不要保存为页面内操作。"}
     after_components = component_summary_from_tree(after["root"])
     operation_id = page_operation_id(active_page, {**target, "operate": operate, "effect": effect})
@@ -1073,10 +1249,28 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
     execute_tap(config.device_id, [int(x), int(y)])
     time.sleep(1.2)
     after_capture = capture_state_without_graph_write()
-    after = state_response_from_capture(after_capture["root"], after_capture["state"], load_navigation_graph(config.work_dir), from_page)
-    to_page = after["state"]["page_name"]
     graph = load_navigation_graph(config.work_dir)
-    if to_page == from_page:
+    from_state = graph.get("states", {}).get(
+        from_page,
+        current.get("active_state") or current.get("state") or {"page_name": from_page},
+    )
+    same_page = states_represent_same_page(after_capture["state"], from_state)
+    if same_page:
+        after_capture["state"] = resolve_detected_state(
+            graph, after_capture["state"], from_page
+        )
+    else:
+        after_capture["state"] = contextualize_child_state(
+            graph, from_page, after_capture["state"]
+        )
+    after = state_response_from_capture(
+        after_capture["root"],
+        after_capture["state"],
+        graph,
+        from_page,
+    )
+    to_page = after["state"]["page_name"]
+    if same_page:
         if ctype in {"Toggle", "Switch", "CheckBox", "Checkbox"}:
             upsert_clicked_target_as_candidate(graph, from_page, target)
             save_navigation_graph(graph, config.work_dir)
@@ -1492,9 +1686,14 @@ def api_navigate_to_page(req: NavigateToPageRequest) -> JSONResponse:
             from_page = str(t.get("from_page") or "")
             for step in transition_steps(t):
                 before = capture_ui_tree_state_without_graph_write()
+                before["state"] = resolve_detected_state(
+                    graph, before["state"], from_page
+                )
                 last_capture = before
                 detected_page = str(before["state"].get("page_name") or "")
-                if from_page and detected_page != from_page:
+                if from_page and not state_matches_graph_page(
+                    graph, before["state"], from_page
+                ):
                     raise ValueError(f"无法进入 {req.page_name}：当前检测页面是 {detected_page}，但路径下一步要求位于 {from_page}。请先回到正确起始页。")
                 root_json = before["root"]
                 center = find_candidate_center_for_target(root_json, step.get("target") or {})
@@ -1503,7 +1702,12 @@ def api_navigate_to_page(req: NavigateToPageRequest) -> JSONResponse:
                 execute_tap(config.device_id, center)
                 time.sleep(0.5)
         last_capture = capture_ui_tree_state_without_graph_write()
-        if last_capture["state"].get("page_name") != req.page_name:
+        last_capture["state"] = resolve_detected_state(
+            graph, last_capture["state"], req.page_name
+        )
+        if not state_matches_graph_page(
+            graph, last_capture["state"], req.page_name
+        ):
             raise ValueError(f"无法进入 {req.page_name}：最终校验失败，实际位于 {last_capture['state'].get('page_name')}")
         save_current_path_session(config.work_dir, req.page_name)
         if last_capture:

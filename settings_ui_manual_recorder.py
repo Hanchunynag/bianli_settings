@@ -514,6 +514,7 @@ def build_navigation_state(root: Node) -> Dict[str, Any]:
     texts = [text for text in meaningful_texts(scope) if is_stable_text_for_navigation(text)][:8]
     state: Dict[str, Any] = {
         "page_name": page_name,
+        "raw_page_name": page_name,
         "page_description": ("弹窗：" if dialog_root else "") + (title or page_name),
         "last_title": title,
         "signature": {"title": title, "texts_any": texts},
