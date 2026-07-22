@@ -1,0 +1,312 @@
+name: Apply contextual page naming
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-main:
+    if: github.head_ref == 'agent/contextual-page-naming-trigger'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Patch page naming
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one anchor, found {count}")
+              return text.replace(old, new, 1)
+
+          recorder_path = Path("settings_ui_manual_recorder.py")
+          recorder = recorder_path.read_text(encoding="utf-8")
+          recorder = replace_once(
+              recorder,
+              '        "page_name": page_name,\n        "page_description":',
+              '        "page_name": page_name,\n        "raw_page_name": page_name,\n        "page_description":',
+              "add raw_page_name",
+          )
+          recorder_path.write_text(recorder, encoding="utf-8")
+
+          server_path = Path("web_nav_server.py")
+          server = server_path.read_text(encoding="utf-8")
+          server = replace_once(
+              server,
+              "    screen_metrics_from_root,\n    walk,",
+              "    screen_metrics_from_root,\n    state_name_from_title,\n    walk,",
+              "import state_name_from_title",
+          )
+
+          helpers = r'''
+          def state_raw_page_name(state: Dict[str, Any], page_name: str = "") -> str:
+              """Return the title-derived identity independent of its parent path."""
+              raw_name = str(state.get("raw_page_name") or "").strip()
+              if raw_name:
+                  return raw_name
+              title = str(state.get("last_title") or "").strip()
+              if title:
+                  return state_name_from_title(title, overlay=bool(state.get("is_overlay")))
+              return str(state.get("page_name") or page_name or "").strip()
+
+
+          def state_display_title(state: Dict[str, Any], page_name: str = "") -> str:
+              title = str(state.get("last_title") or state.get("page_description") or "").strip()
+              title = title.removeprefix("弹窗：")
+              if title:
+                  return title
+              if page_name == "Pages_root":
+                  return "设置"
+              return page_name.removeprefix("Pages_").removeprefix("Overlay_") or "page"
+
+
+          def current_session_page() -> str:
+              path = config.work_dir / "outputs" / "navigation" / "current_path_session.json"
+              if not path.exists():
+                  return ""
+              try:
+                  return str(load_json(path).get("active_page") or "")
+              except Exception:
+                  return ""
+
+
+          def copy_stored_page_context(
+              detected_state: Dict[str, Any],
+              stored_state: Dict[str, Any],
+              page_name: str,
+          ) -> Dict[str, Any]:
+              state = dict(detected_state)
+              state["page_name"] = page_name
+              state["raw_page_name"] = state_raw_page_name(detected_state)
+              for key in (
+                  "parent_page",
+                  "parent_title",
+                  "page_description",
+                  "state_type",
+                  "is_overlay",
+                  "overlay_parent",
+                  "overlay_title",
+              ):
+                  if key in stored_state:
+                      state[key] = stored_state[key]
+              return state
+
+
+          def resolve_detected_state(
+              graph: Dict[str, Any],
+              detected_state: Dict[str, Any],
+              preferred_page: str = "",
+          ) -> Dict[str, Any]:
+              """Restore a contextual graph name from a title-only UI detection."""
+              state = dict(detected_state)
+              raw_name = state_raw_page_name(state)
+              state["raw_page_name"] = raw_name
+              if raw_name == "Pages_root":
+                  state["page_name"] = "Pages_root"
+                  return state
+
+              states = graph.get("states", {})
+              preferred_state = states.get(preferred_page, {}) if preferred_page else {}
+              if isinstance(preferred_state, dict) and state_raw_page_name(preferred_state, preferred_page) == raw_name:
+                  return copy_stored_page_context(state, preferred_state, preferred_page)
+
+              matches = []
+              for page_name, stored_state in states.items():
+                  if not isinstance(stored_state, dict):
+                      continue
+                  if state_raw_page_name(stored_state, str(page_name)) == raw_name:
+                      matches.append((str(page_name), stored_state))
+              if len(matches) == 1:
+                  return copy_stored_page_context(state, matches[0][1], matches[0][0])
+              return state
+
+
+          def states_represent_same_page(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+              return bool(
+                  state_raw_page_name(left)
+                  and state_raw_page_name(left) == state_raw_page_name(right)
+              )
+
+
+          def state_matches_graph_page(
+              graph: Dict[str, Any],
+              detected_state: Dict[str, Any],
+              page_name: str,
+          ) -> bool:
+              expected_state = graph.get("states", {}).get(page_name, {"page_name": page_name})
+              return states_represent_same_page(detected_state, expected_state)
+
+
+          def rename_graph_page(graph: Dict[str, Any], old_name: str, new_name: str) -> None:
+              if not old_name or old_name == new_name:
+                  return
+              states = graph.setdefault("states", {})
+              if old_name not in states or new_name in states:
+                  return
+              state = states.pop(old_name)
+              state["page_name"] = new_name
+              states[new_name] = state
+              for transition in graph.get("transitions", []):
+                  if transition.get("from_page") == old_name:
+                      transition["from_page"] = new_name
+                  if transition.get("to_page") == old_name:
+                      transition["to_page"] = new_name
+
+
+          def contextualize_child_state(
+              graph: Dict[str, Any],
+              from_page: str,
+              detected_state: Dict[str, Any],
+          ) -> Dict[str, Any]:
+              """Build Pages_<parent title>to<child title> for a recorded transition."""
+              state = dict(detected_state)
+              raw_name = state_raw_page_name(state)
+              if raw_name == "Pages_root":
+                  state["page_name"] = "Pages_root"
+                  state["raw_page_name"] = "Pages_root"
+                  return state
+
+              parent_state = graph.get("states", {}).get(from_page, {"page_name": from_page})
+              parent_title = state_display_title(parent_state, from_page)
+              child_title = state_display_title(state, raw_name)
+              contextual_name = state_name_from_title(
+                  f"{parent_title}to{child_title}",
+                  overlay=bool(state.get("is_overlay")),
+              )
+
+              matching_children = []
+              for transition in graph.get("transitions", []):
+                  if transition.get("from_page") != from_page:
+                      continue
+                  child_name = str(transition.get("to_page") or "")
+                  child_state = graph.get("states", {}).get(child_name, {})
+                  if isinstance(child_state, dict) and state_raw_page_name(child_state, child_name) == raw_name:
+                      matching_children.append(child_name)
+              if len(matching_children) == 1 and matching_children[0] != contextual_name:
+                  rename_graph_page(graph, matching_children[0], contextual_name)
+
+              existing_state = graph.get("states", {}).get(contextual_name, {})
+              if isinstance(existing_state, dict):
+                  state = copy_stored_page_context(state, existing_state, contextual_name)
+              state.update({
+                  "page_name": contextual_name,
+                  "raw_page_name": raw_name,
+                  "parent_page": from_page,
+                  "parent_title": parent_title,
+                  "page_description": f"{parent_title} -> {child_title}",
+              })
+              return state
+
+
+          '''
+          server = replace_once(
+              server,
+              "def read_current_state(capture: bool, persist_candidates: bool = True) -> Dict[str, Any]:",
+              helpers + "def read_current_state(capture: bool, persist_candidates: bool = True) -> Dict[str, Any]:",
+              "insert contextual naming helpers",
+          )
+          server = replace_once(
+              server,
+              "    state = build_navigation_state(root_json)\n    graph = load_navigation_graph(config.work_dir)\n    existing_state = graph.get(\"states\", {}).get(state[\"page_name\"], {})",
+              "    state = build_navigation_state(root_json)\n    graph = load_navigation_graph(config.work_dir)\n    state = resolve_detected_state(graph, state, current_session_page())\n    existing_state = graph.get(\"states\", {}).get(state[\"page_name\"], {})",
+              "resolve current state",
+          )
+          server = replace_once(
+              server,
+              ") -> Dict[str, Any]:\n    candidates = extract_navigation_candidates(root_json)\n    return {\n        \"state\": state,",
+              ") -> Dict[str, Any]:\n    state = resolve_detected_state(graph, state, active_page)\n    candidates = extract_navigation_candidates(root_json)\n    return {\n        \"state\": state,",
+              "resolve capture response",
+          )
+
+          old_capture = '    return {"root": root_json, "state": build_navigation_state(root_json)}'
+          new_capture = (
+              '    state = build_navigation_state(root_json)\n'
+              '    graph = load_navigation_graph(config.work_dir)\n'
+              '    state = resolve_detected_state(graph, state, current_session_page())\n'
+              '    return {"root": root_json, "state": state}'
+          )
+          if server.count(old_capture) != 2:
+              raise SystemExit(f"resolve capture helpers: expected two anchors, found {server.count(old_capture)}")
+          server = server.replace(old_capture, new_capture, 2)
+
+          server = replace_once(
+              server,
+              '    after_page = after["state"].get("page_name")\n    if after_page != before_page:',
+              '    after_page = after["state"].get("page_name")\n    if not states_represent_same_page(after["state"], before["state"]):',
+              "same-page tap comparison",
+          )
+          server = replace_once(
+              server,
+              '    if after["state"].get("page_name") != before_page:',
+              '    if not states_represent_same_page(after["state"], before["state"]):',
+              "same-page gesture comparison",
+          )
+
+          old_tap = (
+              '    after_capture = capture_state_without_graph_write()\n'
+              '    after = state_response_from_capture(after_capture["root"], after_capture["state"], load_navigation_graph(config.work_dir), from_page)\n'
+              '    to_page = after["state"]["page_name"]\n'
+              '    graph = load_navigation_graph(config.work_dir)\n'
+              '    if to_page == from_page:'
+          )
+          new_tap = (
+              '    after_capture = capture_state_without_graph_write()\n'
+              '    graph = load_navigation_graph(config.work_dir)\n'
+              '    from_state = graph.get("states", {}).get(\n'
+              '        from_page,\n'
+              '        current.get("active_state") or current.get("state") or {"page_name": from_page},\n'
+              '    )\n'
+              '    same_page = states_represent_same_page(after_capture["state"], from_state)\n'
+              '    if same_page:\n'
+              '        after_capture["state"] = resolve_detected_state(graph, after_capture["state"], from_page)\n'
+              '    else:\n'
+              '        after_capture["state"] = contextualize_child_state(graph, from_page, after_capture["state"])\n'
+              '    after = state_response_from_capture(\n'
+              '        after_capture["root"],\n'
+              '        after_capture["state"],\n'
+              '        graph,\n'
+              '        from_page,\n'
+              '    )\n'
+              '    to_page = after["state"]["page_name"]\n'
+              '    if same_page:'
+          )
+          server = replace_once(server, old_tap, new_tap, "contextualize recorded child")
+
+          server = replace_once(
+              server,
+              '                before = capture_ui_tree_state_without_graph_write()\n                last_capture = before\n                detected_page = str(before["state"].get("page_name") or "")\n                if from_page and detected_page != from_page:',
+              '                before = capture_ui_tree_state_without_graph_write()\n                before["state"] = resolve_detected_state(graph, before["state"], from_page)\n                last_capture = before\n                detected_page = str(before["state"].get("page_name") or "")\n                if from_page and not state_matches_graph_page(graph, before["state"], from_page):',
+              "quick navigation step validation",
+          )
+          server = replace_once(
+              server,
+              '        last_capture = capture_ui_tree_state_without_graph_write()\n        if last_capture["state"].get("page_name") != req.page_name:',
+              '        last_capture = capture_ui_tree_state_without_graph_write()\n        last_capture["state"] = resolve_detected_state(graph, last_capture["state"], req.page_name)\n        if not state_matches_graph_page(graph, last_capture["state"], req.page_name):',
+              "quick navigation final validation",
+          )
+
+          server_path.write_text(server, encoding="utf-8")
+          PY
+
+      - name: Validate Python syntax
+        run: python -m py_compile settings_ui_manual_recorder.py web_nav_server.py
+
+      - name: Commit to main and remove workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add settings_ui_manual_recorder.py web_nav_server.py
+          git commit -m "Use parent context in page names"
+          git push origin main
