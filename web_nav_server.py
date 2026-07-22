@@ -549,6 +549,26 @@ def page_operation_id(page_name: str, target: Dict[str, Any]) -> str:
     return f"{page_name}__op__{safe}_{digest}"
 
 
+def next_page_operation_id(state_entry: Dict[str, Any]) -> str:
+    """生成当前页面内部顺序编号：operation1、operation2……"""
+    operations = state_entry.get("page_operations", []) or []
+
+    max_index = 0
+
+    for operation in operations:
+        operation_id = str(operation.get("operation_id") or "")
+
+        if not operation_id.startswith("operation"):
+            continue
+
+        number = operation_id[len("operation"):]
+
+        if number.isdigit():
+            max_index = max(max_index, int(number))
+
+    return f"operation{max_index + 1}"
+
+
 def page_variant_id(page_name: str, operation: Dict[str, Any], after_signature: str) -> str:
     payload = [page_name, operation.get("operation_id"), operation.get("effect"), after_signature]
     digest = hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:10]
@@ -739,6 +759,190 @@ def build_page_directory(graph: Dict[str, Any]) -> Dict[str, Any]:
             "state_type": st.get("state_type") or ("overlay" if st.get("is_overlay") else "page"),
         })
     return {"root": "Pages_root", "items": [node("Pages_root", {"Pages_root"})] if "Pages_root" in states else [], "flat_pages": sorted(flat, key=lambda x: x["page_name"])}
+
+
+def record_popup_operation(
+    x: int,
+    y: int,
+    manual_label: str = "",
+) -> Dict[str, Any]:
+    """
+    记录当前页面内的弹窗操作。
+
+    点击控件后即使弹窗被识别为新的 Overlay 状态，
+    也始终将该操作保存到点击前的当前页面中。
+
+    不创建 transition，
+    不写 pending_action_chain，
+    不将弹窗作为新的页面节点保存。
+    """
+
+    # 1. 采集点击前状态，但不写导航图
+    before = capture_state_without_graph_write()
+
+    graph = load_navigation_graph(config.work_dir)
+
+    active_state = active_navigation_state(
+        config.work_dir,
+        graph,
+        before["state"],
+    )
+
+    active_page = str(
+        active_state.get("page_name")
+        or before["state"].get("page_name")
+        or ""
+    )
+
+    if not active_page:
+        raise ValueError("无法确定当前页面，不能保存弹窗操作。")
+
+    # 2. 根据用户点击位置找到控件
+    hit = hit_test_full_ui_tree(
+        before["root"],
+        int(x),
+        int(y),
+    )
+
+    target = build_semantic_target_from_node(
+        hit,
+        manual_label=manual_label.strip(),
+    )
+
+    append_web_history({
+        "event": "popup_tap",
+        "page_name": active_page,
+        "debug": {
+            "point": [int(x), int(y)],
+            "hit_node": hit,
+            "needs_manual_label": target.get(
+                "needs_manual_label",
+                False,
+            ),
+        },
+    })
+
+    # 3. 无稳定 key/text 时，让前端补描述
+    if target.get("needs_manual_label"):
+        current = state_response_from_capture(
+            before["root"],
+            before["state"],
+            graph,
+            active_page,
+            message="命中控件缺少稳定 key/text，请填写操作描述。",
+        )
+
+        return {
+            **current,
+            "needs_manual_label": True,
+            "hit_node": hit,
+            "popup_mode": True,
+        }
+
+    # 4. 保存点击前控件摘要
+    before_components = component_summary_from_tree(
+        before["root"]
+    )
+
+    # 5. 真机点击
+    execute_tap(
+        config.device_id,
+        [int(x), int(y)],
+    )
+
+    time.sleep(1.2)
+
+    # 6. 采集点击后状态，不判断 page_name
+    after = capture_state_without_graph_write()
+
+    after_components = component_summary_from_tree(
+        after["root"]
+    )
+
+    # 7. 计算弹窗出现前后的控件差异
+    before_map = {
+        candidate_merge_key(item): item
+        for item in before_components
+        if candidate_merge_key(item)
+    }
+
+    after_map = {
+        candidate_merge_key(item): item
+        for item in after_components
+        if candidate_merge_key(item)
+    }
+
+    revealed_keys = set(after_map) - set(before_map)
+    hidden_keys = set(before_map) - set(after_map)
+
+    revealed = [
+        after_map[key]
+        for key in revealed_keys
+    ]
+
+    hidden = [
+        before_map[key]
+        for key in hidden_keys
+    ]
+
+    # 8. 始终保存到点击前的 active_page
+    state_entry = graph.setdefault(
+        "states",
+        {},
+    ).setdefault(
+        active_page,
+        before["state"],
+    )
+
+    state_entry.update(before["state"])
+
+    operation_id = next_page_operation_id(state_entry)
+
+    # 9. 保存页面弹窗操作
+    operation = {
+        "operation_id": operation_id,
+        "created_at": now_iso(),
+        "operate": "tap",
+        "effect": "open_popup",
+        "target": step_target(target),
+        "before_signature": components_signature(
+            before_components
+        ),
+        "after_signature": components_signature(
+            after_components
+        ),
+        "revealed_candidates": revealed,
+        "hidden_candidates": hidden,
+    }
+
+    state_entry.setdefault(
+        "page_operations",
+        [],
+    ).append(operation)
+
+    upsert_clicked_target_as_candidate(
+        graph,
+        active_page,
+        target,
+        operation_id=operation_id,
+    )
+
+    save_navigation_graph(
+        graph,
+        config.work_dir,
+    )
+
+    return state_response_from_capture(
+        after["root"],
+        before["state"],
+        graph,
+        active_page,
+        message=(
+            f"已记录弹窗操作 {operation_id}："
+            f"新增 {len(revealed)} 个控件，"
+            f"消失 {len(hidden)} 个控件。"
+        ),
+    )
 
 
 def record_same_page_operation(x: int, y: int, manual_label: str = "") -> Dict[str, Any]:
@@ -1008,6 +1212,13 @@ def api_record_action(req: RecordActionRequest) -> JSONResponse:
             return ok_response(**data)
         if action == "same_page_tap":
             data = record_same_page_operation(
+                int(payload.get("x")),
+                int(payload.get("y")),
+                manual_label=str(payload.get("manual_label") or ""),
+            )
+            return JSONResponse(data) if data.get("ok") is False else ok_response(**data)
+        if action == "popup_tap":
+            data = record_popup_operation(
                 int(payload.get("x")),
                 int(payload.get("y")),
                 manual_label=str(payload.get("manual_label") or ""),
