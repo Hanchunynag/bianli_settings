@@ -24,11 +24,13 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          from textwrap import dedent, indent
 
           path = Path("web_nav_server.py")
           text = path.read_text(encoding="utf-8")
 
-          next_fn = '''def next_page_operation_id(state_entry: Dict[str, Any]) -> str:
+          next_fn = dedent('''\
+          def next_page_operation_id(state_entry: Dict[str, Any]) -> str:
               """生成当前页面内部顺序编号：operation1、operation2……"""
               operations = state_entry.get("page_operations", []) or []
 
@@ -48,9 +50,10 @@ jobs:
               return f"operation{max_index + 1}"
 
 
-          '''
+          ''')
 
-          popup_fn = '''def record_popup_operation(
+          popup_fn = dedent('''\
+          def record_popup_operation(
               x: int,
               y: int,
               manual_label: str = "",
@@ -58,7 +61,8 @@ jobs:
               """
               记录当前页面内的弹窗操作。
 
-              点击控件后即使弹窗被识别为新的 Overlay 状态，n              也始终将该操作保存到点击前的当前页面中。
+              点击控件后即使弹窗被识别为新的 Overlay 状态，
+              也始终将该操作保存到点击前的当前页面中。
 
               不创建 transition，
               不写 pending_action_chain，
@@ -67,12 +71,15 @@ jobs:
 
               # 1. 采集点击前状态，但不写导航图
               before = capture_state_without_graph_write()
+
               graph = load_navigation_graph(config.work_dir)
+
               active_state = active_navigation_state(
                   config.work_dir,
                   graph,
                   before["state"],
               )
+
               active_page = str(
                   active_state.get("page_name")
                   or before["state"].get("page_name")
@@ -82,16 +89,18 @@ jobs:
               if not active_page:
                   raise ValueError("无法确定当前页面，不能保存弹窗操作。")
 
-              # 2. 根据点击位置查找控件
+              # 2. 根据用户点击位置找到控件
               hit = hit_test_full_ui_tree(
                   before["root"],
                   int(x),
                   int(y),
               )
+
               target = build_semantic_target_from_node(
                   hit,
                   manual_label=manual_label.strip(),
               )
+
               append_web_history({
                   "event": "popup_tap",
                   "page_name": active_page,
@@ -105,7 +114,7 @@ jobs:
                   },
               })
 
-              # 3. 没有稳定 key/text 时，让前端补充描述
+              # 3. 无稳定 key/text 时，让前端补描述
               if target.get("needs_manual_label"):
                   current = state_response_from_capture(
                       before["root"],
@@ -114,6 +123,7 @@ jobs:
                       active_page,
                       message="命中控件缺少稳定 key/text，请填写操作描述。",
                   )
+
                   return {
                       **current,
                       "needs_manual_label": True,
@@ -126,15 +136,17 @@ jobs:
                   before["root"]
               )
 
-              # 5. 执行点击
+              # 5. 真机点击
               execute_tap(
                   config.device_id,
                   [int(x), int(y)],
               )
+
               time.sleep(1.2)
 
-              # 6. 采集点击后状态，不进行 page_name 判断
+              # 6. 采集点击后状态，不判断 page_name
               after = capture_state_without_graph_write()
+
               after_components = component_summary_from_tree(
                   after["root"]
               )
@@ -145,15 +157,25 @@ jobs:
                   for item in before_components
                   if candidate_merge_key(item)
               }
+
               after_map = {
                   candidate_merge_key(item): item
                   for item in after_components
                   if candidate_merge_key(item)
               }
+
               revealed_keys = set(after_map) - set(before_map)
               hidden_keys = set(before_map) - set(after_map)
-              revealed = [after_map[key] for key in revealed_keys]
-              hidden = [before_map[key] for key in hidden_keys]
+
+              revealed = [
+                  after_map[key]
+                  for key in revealed_keys
+              ]
+
+              hidden = [
+                  before_map[key]
+                  for key in hidden_keys
+              ]
 
               # 8. 始终保存到点击前的 active_page
               state_entry = graph.setdefault(
@@ -163,7 +185,9 @@ jobs:
                   active_page,
                   before["state"],
               )
+
               state_entry.update(before["state"])
+
               operation_id = next_page_operation_id(state_entry)
 
               # 9. 保存页面弹窗操作
@@ -182,6 +206,7 @@ jobs:
                   "revealed_candidates": revealed,
                   "hidden_candidates": hidden,
               }
+
               state_entry.setdefault(
                   "page_operations",
                   [],
@@ -193,6 +218,7 @@ jobs:
                   target,
                   operation_id=operation_id,
               )
+
               save_navigation_graph(
                   graph,
                   config.work_dir,
@@ -211,7 +237,7 @@ jobs:
               )
 
 
-          '''
+          ''')
 
           if "def next_page_operation_id(" not in text:
               anchor = "def page_variant_id(page_name: str, operation: Dict[str, Any], after_signature: str) -> str:\n"
@@ -229,14 +255,15 @@ jobs:
           head, tail = text.split(api_marker, 1)
           if 'if action == "popup_tap":' not in tail:
               anchor = '        if action == "same_page_gesture":\n'
-              route = '''        if action == "popup_tap":
-              data = record_popup_operation(
-                  int(payload.get("x")),
-                  int(payload.get("y")),
-                  manual_label=str(payload.get("manual_label") or ""),
-              )
-              return JSONResponse(data) if data.get("ok") is False else ok_response(**data)
-          '''
+              route = indent(dedent('''\
+              if action == "popup_tap":
+                  data = record_popup_operation(
+                      int(payload.get("x")),
+                      int(payload.get("y")),
+                      manual_label=str(payload.get("manual_label") or ""),
+                  )
+                  return JSONResponse(data) if data.get("ok") is False else ok_response(**data)
+              '''), "        ")
               if anchor not in tail:
                   raise RuntimeError("找不到 popup_tap 路由插入点")
               tail = tail.replace(anchor, route + anchor, 1)
