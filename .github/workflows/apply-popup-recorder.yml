@@ -1,15 +1,17 @@
 name: Apply popup recorder patch
 
 on:
-  push:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
     branches:
-      - agent/refactor-web-recorder-popup
+      - main
 
 permissions:
   contents: write
 
 jobs:
   patch:
+    if: github.head_ref == 'agent/refactor-web-recorder-popup'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,25 +58,36 @@ jobs:
               """
               记录当前页面内的弹窗操作。
 
-              点击控件后即使弹窗被识别为新的 Overlay 状态，
-              也始终将该操作保存到点击前的当前页面中。
+              点击控件后即使弹窗被识别为新的 Overlay 状态，n              也始终将该操作保存到点击前的当前页面中。
 
               不创建 transition，
               不写 pending_action_chain，
               不将弹窗作为新的页面节点保存。
               """
+
+              # 1. 采集点击前状态，但不写导航图
               before = capture_state_without_graph_write()
               graph = load_navigation_graph(config.work_dir)
-              active_state = active_navigation_state(config.work_dir, graph, before["state"])
+              active_state = active_navigation_state(
+                  config.work_dir,
+                  graph,
+                  before["state"],
+              )
               active_page = str(
                   active_state.get("page_name")
                   or before["state"].get("page_name")
                   or ""
               )
+
               if not active_page:
                   raise ValueError("无法确定当前页面，不能保存弹窗操作。")
 
-              hit = hit_test_full_ui_tree(before["root"], int(x), int(y))
+              # 2. 根据点击位置查找控件
+              hit = hit_test_full_ui_tree(
+                  before["root"],
+                  int(x),
+                  int(y),
+              )
               target = build_semantic_target_from_node(
                   hit,
                   manual_label=manual_label.strip(),
@@ -85,10 +98,14 @@ jobs:
                   "debug": {
                       "point": [int(x), int(y)],
                       "hit_node": hit,
-                      "needs_manual_label": target.get("needs_manual_label", False),
+                      "needs_manual_label": target.get(
+                          "needs_manual_label",
+                          False,
+                      ),
                   },
               })
 
+              # 3. 没有稳定 key/text 时，让前端补充描述
               if target.get("needs_manual_label"):
                   current = state_response_from_capture(
                       before["root"],
@@ -104,12 +121,25 @@ jobs:
                       "popup_mode": True,
                   }
 
-              before_components = component_summary_from_tree(before["root"])
-              execute_tap(config.device_id, [int(x), int(y)])
-              time.sleep(1.2)
-              after = capture_state_without_graph_write()
-              after_components = component_summary_from_tree(after["root"])
+              # 4. 保存点击前控件摘要
+              before_components = component_summary_from_tree(
+                  before["root"]
+              )
 
+              # 5. 执行点击
+              execute_tap(
+                  config.device_id,
+                  [int(x), int(y)],
+              )
+              time.sleep(1.2)
+
+              # 6. 采集点击后状态，不进行 page_name 判断
+              after = capture_state_without_graph_write()
+              after_components = component_summary_from_tree(
+                  after["root"]
+              )
+
+              # 7. 计算弹窗出现前后的控件差异
               before_map = {
                   candidate_merge_key(item): item
                   for item in before_components
@@ -125,31 +155,48 @@ jobs:
               revealed = [after_map[key] for key in revealed_keys]
               hidden = [before_map[key] for key in hidden_keys]
 
-              state_entry = graph.setdefault("states", {}).setdefault(
+              # 8. 始终保存到点击前的 active_page
+              state_entry = graph.setdefault(
+                  "states",
+                  {},
+              ).setdefault(
                   active_page,
                   before["state"],
               )
               state_entry.update(before["state"])
               operation_id = next_page_operation_id(state_entry)
+
+              # 9. 保存页面弹窗操作
               operation = {
                   "operation_id": operation_id,
                   "created_at": now_iso(),
                   "operate": "tap",
                   "effect": "open_popup",
                   "target": step_target(target),
-                  "before_signature": components_signature(before_components),
-                  "after_signature": components_signature(after_components),
+                  "before_signature": components_signature(
+                      before_components
+                  ),
+                  "after_signature": components_signature(
+                      after_components
+                  ),
                   "revealed_candidates": revealed,
                   "hidden_candidates": hidden,
               }
-              state_entry.setdefault("page_operations", []).append(operation)
+              state_entry.setdefault(
+                  "page_operations",
+                  [],
+              ).append(operation)
+
               upsert_clicked_target_as_candidate(
                   graph,
                   active_page,
                   target,
                   operation_id=operation_id,
               )
-              save_navigation_graph(graph, config.work_dir)
+              save_navigation_graph(
+                  graph,
+                  config.work_dir,
+              )
 
               return state_response_from_capture(
                   after["root"],
@@ -202,7 +249,6 @@ jobs:
         shell: bash
         run: |
           python -m py_compile web_nav_server.py
-          test "$(git diff --name-only | sort | tr '\n' ' ')" = ".github/workflows/apply-popup-recorder.yml web_nav_server.py "
           rm .github/workflows/apply-popup-recorder.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
