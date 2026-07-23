@@ -1,6 +1,8 @@
 import { api, postJson, requestJson, showError } from './api.js';
 import { actionButton, clear, el, escapeHtml } from './dom.js';
-import { store } from './state.js';
+import { store } from './state.js?v=tree-directory-5';
+
+let directorySearchTimer;
 
 export async function refreshDirectory() {
   const data = await requestJson('/api/page_directory').catch((err) => ({ ok: false, error: err.message }));
@@ -29,7 +31,8 @@ export function render(data) {
   el('warning').classList.toggle('hidden', !data.warning);
   const modeMsg = store.samePageMode ? '当前模式：记录同页点击变化。点击截图中的控件后，会补采并合并当前页面内容。' : '';
   const operationModeMsg = store.pageOperationMode ? '当前模式：记录同页手势。选择手势和变化结果后，点击截图中的操作区域。' : '';
-  const overlayMsg = data.message || modeMsg || operationModeMsg || (data.state?.is_overlay ? '当前页面已标记为弹窗页面' : '');
+  const popupModeMsg = store.popupMode ? '当前模式：记录弹窗操作。点击截图中的控件后，将保存为当前页面的 operation。' : '';
+  const overlayMsg = data.message || popupModeMsg || modeMsg || operationModeMsg || (data.state?.is_overlay ? '当前页面已标记为弹窗页面' : '');
   el('overlayStatus').textContent = overlayMsg;
   el('overlayStatus').classList.toggle('hidden', !overlayMsg);
 
@@ -38,10 +41,6 @@ export function render(data) {
   el('screen').onload = () => renderOverlay([]);
   renderOverlay([]);
   refreshDirectory();
-}
-
-function candidateTitle(candidate) {
-  return candidate.step_prompt || candidate.key_description || candidate.text || candidate.value || candidate.key || candidate.candidate_id || '';
 }
 
 function renderActionChain(chain) {
@@ -112,6 +111,19 @@ export function renderOverlay(candidates) {
 
 function renderDirectory(data) {
   const box = el('pageDirectory');
+  const search = el('pageSearch');
+  const scheduleSearch = () => {
+    clearTimeout(directorySearchTimer);
+    directorySearchTimer = setTimeout(() => {
+      const query = search.value.trim().toLowerCase();
+      if (query === store.directoryQuery) return;
+      store.directoryQuery = query;
+      renderDirectory(data);
+    }, 80);
+  };
+  search.oninput = scheduleSearch;
+  search.onkeyup = scheduleSearch;
+  search.onkeydown = scheduleSearch;
   clear(box);
   const query = (store.directoryQuery || '').trim().toLowerCase();
   const nodeText = (node) => [
@@ -126,6 +138,9 @@ function renderDirectory(data) {
   const addNode = (node, depth = 0) => {
     if (!matchesQuery(node)) return;
     shown += 1;
+    const children = (node.children || []).filter(matchesQuery);
+    const expandable = children.length > 0;
+    const expanded = expandable && (Boolean(query) || store.expandedPages.has(node.page_name));
     const row = document.createElement('div');
     row.className = 'dirNode';
     row.style.setProperty('--depth', String(Math.min(depth, 8)));
@@ -134,15 +149,33 @@ function renderDirectory(data) {
     const showVia = node.via && (node.via.step_count > 1 || normalizeText(viaLabel) !== normalizeText(title));
     const via = showVia ? escapeHtml(node.via.step_count > 1 ? `${node.via.step_count} 步` : viaLabel) : '';
     row.innerHTML = `
-      <div class="dirMain">
-        <div class="dirTitle">
-          <strong>${escapeHtml(title)}</strong>
-          ${via ? `<span class="dirVia">${via}</span>` : ''}
+      <div class="dirMain${expandable ? ' isExpandable' : ''}" ${expandable ? `role="button" tabindex="0" aria-expanded="${expanded}"` : ''}>
+        <span class="dirCaret${expandable ? '' : ' isLeaf'}" aria-hidden="true">${expandable ? (expanded ? '−' : '+') : ''}</span>
+        <div class="dirContent">
+          <div class="dirTitle">
+            <strong>${escapeHtml(title)}</strong>
+            ${via ? `<span class="dirVia">${via}</span>` : ''}
+          </div>
+          <code>${escapeHtml(node.page_name)}</code>
         </div>
-        <code>${escapeHtml(node.page_name)}</code>
       </div>
       <div class="dirActions"></div>
     `;
+    if (expandable) {
+      const main = row.querySelector('.dirMain');
+      const toggle = () => {
+        if (store.expandedPages.has(node.page_name)) store.expandedPages.delete(node.page_name);
+        else store.expandedPages.add(node.page_name);
+        renderDirectory(data);
+      };
+      main.onclick = toggle;
+      main.onkeydown = (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          toggle();
+        }
+      };
+    }
     const actions = row.querySelector('.dirActions');
     actions.appendChild(actionButton('详情', () => loadPageDetail(node.page_name), 'secondary compact'));
     if (node.via?.transition_id) {
@@ -153,10 +186,10 @@ function renderDirectory(data) {
     }
     actions.appendChild(actionButton('删页', () => dryRunDelete('page', { page_name: node.page_name }), 'danger compact'));
     box.appendChild(row);
-    (node.children || []).forEach((child) => addNode(child, depth + 1));
+    if (expanded) children.forEach((child) => addNode(child, depth + 1));
   };
   (data.items || []).forEach((node) => addNode(node));
-  el('directoryCount').textContent = query ? `${shown}/${total}` : `${total}`;
+  el('directoryCount').textContent = shown === total ? `${total}` : `${shown}/${total}`;
   if (!shown) box.insertAdjacentHTML('beforeend', '<div class="muted">没有匹配页面。</div>');
 }
 
@@ -347,13 +380,6 @@ function appendList(box, title, rows, labelFn, buttonsFn) {
     buttonsFn(item).forEach((button) => row.appendChild(button));
     box.appendChild(row);
   });
-}
-
-function transitionLabel(transition) {
-  const steps = transitionSteps(transition);
-  if (steps.length) return steps.map(stepLabel).join(' -> ');
-  const target = transition.target || {};
-  return target.step_prompt || target.key_description || target.value || '';
 }
 
 function transitionSteps(transition) {

@@ -8,7 +8,7 @@ import struct
 import zlib
 from pathlib import Path
 
-from settings_ui_manual_recorder import save_navigation_graph
+from settings_ui_manual_recorder import save_navigation_graph, state_name_from_title
 
 
 ROOT = Path(__file__).resolve().parent
@@ -118,10 +118,11 @@ def themes_tree():
     ])
 
 
-def state(page_name, title, candidates=0, outgoing=0, incoming=0):
-    return {
+def state(page_name, title, parent_page="", parent_title="", candidates=0, outgoing=0, incoming=0):
+    result = {
         "page_name": page_name,
-        "page_description": title,
+        "raw_page_name": state_name_from_title(title),
+        "page_description": f"{parent_title} to{title}" if parent_title else title,
         "last_title": title,
         "signature": {"title": title, "texts_any": [title]},
         "candidate_count": candidates,
@@ -129,6 +130,9 @@ def state(page_name, title, candidates=0, outgoing=0, incoming=0):
         "outgoing_count": outgoing,
         "merged_candidates": [],
     }
+    if parent_page:
+        result.update({"parent_page": parent_page, "parent_title": parent_title})
+    return result
 
 
 def step(name, key, component_type="ListItem"):
@@ -173,12 +177,8 @@ def operation(oid, operate, name, key, effect, component_type="Card"):
     }
 
 
-def page_name_for(title, used):
-    if title == "设置":
-        return "Pages_root"
-    safe = re.sub(r"\s+", "_", title)
-    safe = re.sub(r"[^\w\u4e00-\u9fff]+", "_", safe).strip("_") or "page"
-    base = f"Pages_{safe}"
+def page_name_for(parent_title, title, used):
+    base = state_name_from_title(f"{parent_title} to{title}")
     page = base
     index = 2
     while page in used:
@@ -212,8 +212,8 @@ def candidate(name, key, transition_ids=None, component_type="ListItem"):
     }
 
 
-def add_state(states, page_name, title):
-    states[page_name] = state(page_name, title)
+def add_state(states, page_name, title, parent_page="", parent_title=""):
+    states[page_name] = state(page_name, title, parent_page, parent_title)
 
 
 def add_transition_record(graph, from_page, to_page, name, key, component_type="ListItem"):
@@ -266,21 +266,21 @@ def build_large_settings_graph():
     title_to_page = {"设置": "Pages_root"}
 
     for category_index, (category, children) in enumerate(catalog, start=1):
-        category_page = page_name_for(category, used)
+        category_page = page_name_for("设置", category, used)
         title_to_page[category] = category_page
-        add_state(graph["states"], category_page, category)
+        add_state(graph["states"], category_page, category, "Pages_root", "设置")
         add_transition_record(graph, "Pages_root", category_page, category, key_for("root", category_index, category))
 
         for child_index, child in enumerate(children, start=1):
-            child_page = page_name_for(child, used)
+            child_page = page_name_for(category, child, used)
             title_to_page[f"{category}/{child}"] = child_page
-            add_state(graph["states"], child_page, child)
+            add_state(graph["states"], child_page, child, category_page, category)
             add_transition_record(graph, category_page, child_page, child, key_for(category_index, child_index, child))
 
             if child_index in {1, 2}:
                 detail_title = f"{child}详情"
-                detail_page = page_name_for(detail_title, used)
-                add_state(graph["states"], detail_page, detail_title)
+                detail_page = page_name_for(child, detail_title, used)
+                add_state(graph["states"], detail_page, detail_title, child_page, child)
                 add_transition_record(graph, child_page, detail_page, detail_title, key_for(category_index, child_index, "detail", child))
 
     wlan_page = title_to_page["WLAN"]

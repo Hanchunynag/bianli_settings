@@ -4,14 +4,14 @@
 
 1. Web 页面展示和录制设置页面跳转关系。
 2. 轻量导航图 `settings_navigation_graph.json`。
-3. `DFS.py` 按 DFS 生成/执行遍历。
+3. `DFS.py` 按 DFS 导出紧凑路径数据。
 
 ## 文件结构
 
 ```text
 web_nav_server.py                 Web 控制台服务
 settings_ui_manual_recorder.py    UI tree、导航图、clickable 控件提取工具
-DFS.py                            DFS 计划生成与设备执行脚本
+DFS.py                            DFS 路径导出脚本
 create_demo_settings.py           生成模拟设置数据
 templates/nav.html                Web 页面模板
 static/nav.css                    页面样式
@@ -48,29 +48,14 @@ http://127.0.0.1:8020/
 
 ## DFS
 
-只生成遍历计划：
+导出遍历路径：
 
 ```bash
 conda run -n hcy-env python DFS.py --work-dir demo_settings
 ```
 
-模拟执行完整链路，不碰设备：
-
-```bash
-conda run -n hcy-env python DFS.py --work-dir demo_settings --execute --dry-run --step-delay 0
-```
-
-真实设备执行：
-
-```bash
-conda run -n hcy-env python DFS.py --work-dir demo_settings --execute --device-id 68Q0223918000004
-```
-
-默认不会执行页面内操作，例如删除、滑动删除主题等。需要显式加：
-
-```bash
---execute-page-operations
-```
+默认输出到 `demo_settings/outputs/navigation/settings_navigation_paths.json`。
+当前脚本只生成 JSON，不连接设备、不执行页面操作。
 
 ## 数据原则
 
