@@ -32,6 +32,12 @@ MAIN_PAGE_NAME = "com.huawei.hmos.settings.MainAbility"
 NOISE_TEXTS = {"tab_unlock"}
 NON_INTERACTION_TYPES = {"Navigation", "NavDestination", "Page", "Root", "WindowScene"}
 
+TITLE_KEYS = {
+    "title_id",
+    "singletitletext",
+    "titlecompid",
+}
+
 COORDINATE_RECORD_KEYS = {
     "bounds",
     "bounds_center",
@@ -491,42 +497,32 @@ def nearest_label(node: Node) -> str:
     return ""
 
 
-def is_status_bar_noise_text(text: str) -> bool:
-    if text in NOISE_TEXTS:
-        return True
-    if re.fullmatch(r"\d+", text):
-        return True
-    if re.fullmatch(r"\d{1,2}:\d{2}", text):
-        return True
-    if re.fullmatch(r"\d+%", text):
-        return True
-    if re.fullmatch(r"[\d.]+\s*[KMG]?B/s", text, flags=re.IGNORECASE):
-        return True
-    return False
-
-
-def is_page_title_candidate(node: Node) -> bool:
-    if get_type(node) != "Text" or not is_visible(node):
+def is_title_key(key: str) -> bool:
+    """判断控件 key 是否属于页面标题。"""
+    normalized = str(key or "").strip().lower()
+    if not normalized:
         return False
-    text = clean_label(get_text(node))
-    if not text or is_status_bar_noise_text(text):
-        return False
-    rect = parse_rect(get_attr(node, "bounds"))
-    return bool(rect["valid"] and 100 <= rect["top"] <= 250)
+    # 精确匹配，避免误把 subtitle、menuTitle 等识别成页面标题。
+    if normalized in TITLE_KEYS:
+        return True
+    suffix = normalized.rsplit(".", 1)[-1]
+    return suffix in TITLE_KEYS
 
 
 def find_page_title(root: Node) -> str:
     for node, _, _ in walk(root):
         key = get_key(node)
         text = get_text(node)
-        if key == "page.title_id" and text:
+        if not text:
+            continue
+        if is_title_key(key):
             return clean_label(text)
-    title_candidates: List[Tuple[int, int, str]] = []
-    for node, depth, _ in walk(root):
-        if is_page_title_candidate(node):
-            rect = parse_rect(get_attr(node, "bounds"))
-            title_candidates.append((int(rect["top"]), depth, clean_label(get_text(node))))
-    return sorted(title_candidates)[0][2] if title_candidates else ""
+        # 当前 Text 节点位于 TitleBar 内部。
+        for parent in parent_chain(node):
+            parent_name = get_key(parent) or get_type(parent)
+            if "titlebar" in parent_name.lower():
+                return clean_label(text)
+    return ""
 
 
 def find_nav_destination_key(root: Node) -> str:
@@ -570,25 +566,27 @@ def detect_overlay_title(root: Node) -> str:
 
 
 def build_navigation_state(root: Node) -> Dict[str, Any]:
-    dialog_root = detect_dialog_root(root)
-    page = page_identity(root)
-    scope = dialog_root or root
-    overlay_title = detect_overlay_title(root) if dialog_root else ""
-    title = overlay_title or page.get("title") or nearest_label(scope)
-    page_name = state_name_from_title(title or page.get("page_id", "page"), overlay=bool(dialog_root))
-    texts = [text for text in meaningful_texts(scope) if is_stable_text_for_navigation(text)][:8]
-    state: Dict[str, Any] = {
+    title = find_page_title(root)
+    nav_key = find_nav_destination_key(root)
+
+    page_name = state_name_from_title(title or "page")
+    texts = [
+        text
+        for text in meaningful_texts(root)
+        if is_stable_text_for_navigation(text)
+    ][:8]
+    return {
         "page_name": page_name,
         "raw_page_name": page_name,
-        "page_description": ("弹窗：" if dialog_root else "") + (title or page_name),
+        "page_description": title or page_name,
         "last_title": title,
-        "page_id": page.get("page_id", ""),
-        "nav_key": page.get("nav_key", ""),
-        "signature": {"title": title, "texts_any": texts},
+        "page_id": nav_key or f"title::{title}",
+        "nav_key": nav_key,
+        "signature": {
+            "title": title,
+            "texts_any": texts,
+        },
     }
-    if dialog_root:
-        state.update({"state_type": "overlay", "is_overlay": True, "overlay_title": title})
-    return state
 
 
 def node_semantic_summary(node: Node) -> Dict[str, Any]:
@@ -874,7 +872,20 @@ def copy_stored_page_context(detected: Dict[str, Any], stored: Dict[str, Any], p
     for key in ("parent_page", "parent_title"):
         if key in stored:
             state[key] = stored[key]
-    if detected.get("is_overlay") and "overlay_parent" in stored:
+    recorded_as_page = (
+        page_name.startswith("Pages_")
+        and page_name != "Pages_root"
+        and bool(stored.get("parent_page"))
+    )
+    if recorded_as_page:
+        for key in ("state_type", "is_overlay", "overlay_parent", "overlay_title"):
+            state.pop(key, None)
+        state["page_description"] = str(
+            stored.get("page_description")
+            or state.get("page_description")
+            or ""
+        ).removeprefix("弹窗：")
+    elif detected.get("is_overlay") and "overlay_parent" in stored:
         state["overlay_parent"] = stored["overlay_parent"]
     return state
 
@@ -887,16 +898,67 @@ def resolve_detected_state(graph: Dict[str, Any], detected: Dict[str, Any], pref
         return state
     states = graph.get("states", {})
     preferred = states.get(preferred_page, {}) if preferred_page else {}
-    if (
+    preferred_is_contextual = (
         isinstance(preferred, dict)
-        and preferred
+        and bool(preferred)
+        and preferred_page != raw_name
+    )
+    if (
+        preferred_is_contextual
         and states_represent_same_page(state, preferred)
     ):
         return copy_stored_page_context(state, preferred, preferred_page)
+
+    matches = [
+        (str(name), stored)
+        for name, stored in states.items()
+        if isinstance(stored, dict)
+        and state_raw_page_name(stored, str(name)) == raw_name
+    ]
+    scored = sorted(
+        (state_signature_score(state, stored), name, stored)
+        for name, stored in matches
+    )
+    if scored and scored[-1][0] >= 3:
+        best_score = scored[-1][0]
+        best = [item for item in scored if item[0] == best_score]
+        if len(best) == 1:
+            _, name, stored = best[0]
+            return copy_stored_page_context(state, stored, name)
+        preferred_match = next(
+            (item for item in best if item[1] == preferred_page),
+            None,
+        )
+        if preferred_match:
+            _, name, stored = preferred_match
+            return copy_stored_page_context(state, stored, name)
+
     if raw_name == "Pages_root":
+        root_state = states.get("Pages_root", {})
+        if preferred_is_contextual:
+            preferred_score = state_structure_score(state, preferred)
+            root_score = (
+                state_structure_score(state, root_state)
+                if isinstance(root_state, dict) and root_state
+                else -1
+            )
+            if preferred_score >= root_score and preferred_score >= 1:
+                normalized_page = preferred_page
+                if (
+                    preferred_page.startswith("Overlay_")
+                    and preferred.get("parent_page")
+                ):
+                    normalized_page = "Pages_" + preferred_page.removeprefix("Overlay_")
+                    if normalized_page not in states:
+                        rename_graph_page(graph, preferred_page, normalized_page)
+                    preferred = states.get(normalized_page, preferred)
+                return copy_stored_page_context(
+                    state,
+                    preferred,
+                    normalized_page,
+                )
         state["page_name"] = raw_name
         return state
-    matches = [(str(name), stored) for name, stored in states.items() if isinstance(stored, dict) and state_raw_page_name(stored, str(name)) == raw_name]
     return copy_stored_page_context(state, matches[0][1], matches[0][0]) if len(matches) == 1 else state
 
 
@@ -908,6 +970,22 @@ def state_signature_texts(state: Dict[str, Any]) -> Set[str]:
         for value in signature.get("texts_any") or []
         if (text := clean_label(value)) and text != title
     }
+
+
+def state_structure_score(left: Dict[str, Any], right: Dict[str, Any]) -> int:
+    shared_texts = len(state_signature_texts(left) & state_signature_texts(right))
+    same_title = clean_label(left.get("last_title")) == clean_label(right.get("last_title"))
+    return shared_texts * 2 + int(bool(same_title))
+
+
+def state_signature_score(left: Dict[str, Any], right: Dict[str, Any]) -> int:
+    if state_raw_page_name(left) != state_raw_page_name(right):
+        return -1
+    left_nav = str(left.get("nav_key") or "")
+    right_nav = str(right.get("nav_key") or "")
+    if left_nav and right_nav:
+        return 10000 if left_nav == right_nav else -1
+    return state_structure_score(left, right)
 
 
 def states_represent_same_page(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
@@ -967,7 +1045,24 @@ def contextualize_child_state(
     )
     route_title = target_title if child_title == parent_title and target_title else child_title
     contextual_title = f"{parent_title} to{route_title}"
-    contextual_name = state_name_from_title(contextual_title, overlay=bool(state.get("is_overlay")))
+    recorded_as_page = str((via_target or {}).get("expect") or "") == "new_page"
+    if recorded_as_page:
+        for key in ("state_type", "is_overlay", "overlay_parent", "overlay_title"):
+            state.pop(key, None)
+        state["page_description"] = str(
+            state.get("page_description") or ""
+        ).removeprefix("弹窗：")
+    contextual_name = state_name_from_title(
+        contextual_title,
+        overlay=bool(state.get("is_overlay")) and not recorded_as_page,
+    )
+    if contextual_name.startswith("Pages_"):
+        legacy_overlay_name = "Overlay_" + contextual_name.removeprefix("Pages_")
+        if (
+            legacy_overlay_name in graph.get("states", {})
+            and contextual_name not in graph.get("states", {})
+        ):
+            rename_graph_page(graph, legacy_overlay_name, contextual_name)
     matching = []
     for transition in graph.get("transitions", []):
         child_name = str(transition.get("to_page") or "")
