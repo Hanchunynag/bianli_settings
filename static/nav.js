@@ -1,6 +1,6 @@
 import { api, postJson, requestJson } from './nav/api.js';
 import { el } from './nav/dom.js';
-import { store } from './nav/state.js?v=page-identity-1';
+import { store } from './nav/state.js?v=tree-directory-5';
 import { render, renderOverlay } from './nav/render.js?v=page-identity-1';
 
 const consoleAction = (action, payload = {}) => postJson('/api/console_action', { action, payload });
