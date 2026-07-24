@@ -144,8 +144,6 @@ def read_current_state(capture: bool, persist_candidates: bool = True) -> Dict[s
     existing_state = graph.get("states", {}).get(state["page_name"], {})
     if isinstance(existing_state, dict):
         preserve_keys = ["page_operations", "page_variants", "merged_candidates"]
-        if existing_state.get("is_overlay"):
-            preserve_keys.extend(["state_type", "is_overlay", "overlay_parent", "overlay_title", "page_description"])
         state.update({k: existing_state[k] for k in preserve_keys if k in existing_state})
     if persist_candidates:
         graph.setdefault("states", {})[state["page_name"]] = state
