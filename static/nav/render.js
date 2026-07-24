@@ -3,6 +3,75 @@ import { actionButton, clear, el, escapeHtml } from './dom.js';
 import { store } from './state.js?v=tree-directory-5';
 
 let directorySearchTimer;
+const DIRECTORY_ORDER_KEY = 'settings_directory_order_v2';
+let directoryDrag = null;
+let directoryClickBlocked = false;
+
+function directoryOrders() {
+  try {
+    return JSON.parse(localStorage.getItem(DIRECTORY_ORDER_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function orderedDirectoryNodes(parentPage, nodes = []) {
+  const index = new Map((directoryOrders()[parentPage] || []).map((name, order) => [name, order]));
+  return [...nodes].sort((left, right) =>
+    (index.get(left.page_name) ?? Number.MAX_SAFE_INTEGER) -
+    (index.get(right.page_name) ?? Number.MAX_SAFE_INTEGER));
+}
+
+function saveDirectoryOrder(parentPage, pageNames) {
+  const orders = directoryOrders();
+  orders[parentPage] = pageNames;
+  localStorage.setItem(DIRECTORY_ORDER_KEY, JSON.stringify(orders));
+}
+
+function finishDirectoryDrag() {
+  if (directoryDrag?.row) directoryDrag.row.style.opacity = '';
+  directoryDrag = null;
+  setTimeout(() => { directoryClickBlocked = false; }, 0);
+}
+
+function enableDirectoryDrag(main, row, node, parentPage, siblings, rerender) {
+  main.draggable = true;
+  main.style.cursor = 'grab';
+  main.ondragstart = (event) => {
+    directoryDrag = { pageName: node.page_name, parentPage, row };
+    directoryClickBlocked = true;
+    row.style.opacity = '0.45';
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', node.page_name);
+    }
+  };
+  main.ondragend = finishDirectoryDrag;
+  row.ondragover = (event) => {
+    if (!directoryDrag || directoryDrag.parentPage !== parentPage || directoryDrag.pageName === node.page_name) return;
+    event.preventDefault();
+    const after = event.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
+    row.style.boxShadow = `inset 0 ${after ? '-2px' : '2px'} 0 currentColor`;
+  };
+  row.ondragleave = () => { row.style.boxShadow = ''; };
+  row.ondrop = (event) => {
+    event.preventDefault();
+    row.style.boxShadow = '';
+    if (!directoryDrag || directoryDrag.parentPage !== parentPage || directoryDrag.pageName === node.page_name) return;
+    const movingPage = directoryDrag.pageName;
+    const pageNames = orderedDirectoryNodes(parentPage, siblings).map((item) => item.page_name);
+    const sourceIndex = pageNames.indexOf(movingPage);
+    if (sourceIndex < 0) return finishDirectoryDrag();
+    pageNames.splice(sourceIndex, 1);
+    let targetIndex = pageNames.indexOf(node.page_name);
+    if (targetIndex < 0) return finishDirectoryDrag();
+    if (event.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2) targetIndex += 1;
+    pageNames.splice(targetIndex, 0, movingPage);
+    saveDirectoryOrder(parentPage, pageNames);
+    finishDirectoryDrag();
+    rerender();
+  };
+}
 
 export async function refreshDirectory() {
   const data = await requestJson('/api/page_directory').catch((err) => ({ ok: false, error: err.message }));
@@ -126,19 +195,18 @@ function renderDirectory(data) {
   search.onkeydown = scheduleSearch;
   clear(box);
   const query = (store.directoryQuery || '').trim().toLowerCase();
-  const nodeText = (node) => [
-    node.title,
-    node.page_name,
-    node.via?.target_label,
-  ].filter(Boolean).join(' ').toLowerCase();
+  const nodeText = (node) => [node.title, node.page_name, node.via?.target_label].filter(Boolean).join(' ').toLowerCase();
   const totalCount = (node) => 1 + (node.children || []).reduce((sum, child) => sum + totalCount(child), 0);
   const matchesQuery = (node) => !query || nodeText(node).includes(query) || (node.children || []).some(matchesQuery);
+  const roots = data.items || [];
   let shown = 0;
-  const total = (data.items || []).reduce((sum, node) => sum + totalCount(node), 0);
-  const addNode = (node, depth = 0) => {
+  const total = roots.reduce((sum, node) => sum + totalCount(node), 0);
+
+  const addNode = (node, depth = 0, parentPage = '__root__', siblings = roots) => {
     if (!matchesQuery(node)) return;
     shown += 1;
-    const children = (node.children || []).filter(matchesQuery);
+    const rawChildren = node.children || [];
+    const children = orderedDirectoryNodes(node.page_name, rawChildren).filter(matchesQuery);
     const expandable = children.length > 0;
     const expanded = expandable && (Boolean(query) || store.expandedPages.has(node.page_name));
     const row = document.createElement('div');
@@ -161,9 +229,12 @@ function renderDirectory(data) {
       </div>
       <div class="dirActions"></div>
     `;
+
+    const main = row.querySelector('.dirMain');
+    if (!query) enableDirectoryDrag(main, row, node, parentPage, siblings, () => renderDirectory(data));
     if (expandable) {
-      const main = row.querySelector('.dirMain');
       const toggle = () => {
+        if (directoryClickBlocked) return;
         if (store.expandedPages.has(node.page_name)) store.expandedPages.delete(node.page_name);
         else store.expandedPages.add(node.page_name);
         renderDirectory(data);
@@ -176,6 +247,7 @@ function renderDirectory(data) {
         }
       };
     }
+
     const actions = row.querySelector('.dirActions');
     actions.appendChild(actionButton('详情', () => loadPageDetail(node.page_name), 'secondary compact'));
     if (node.via?.transition_id) {
@@ -186,9 +258,10 @@ function renderDirectory(data) {
     }
     actions.appendChild(actionButton('删页', () => dryRunDelete('page', { page_name: node.page_name }), 'danger compact'));
     box.appendChild(row);
-    if (expanded) children.forEach((child) => addNode(child, depth + 1));
+    if (expanded) children.forEach((child) => addNode(child, depth + 1, node.page_name, rawChildren));
   };
-  (data.items || []).forEach((node) => addNode(node));
+
+  orderedDirectoryNodes('__root__', roots).forEach((node) => addNode(node));
   el('directoryCount').textContent = shown === total ? `${total}` : `${shown}/${total}`;
   if (!shown) box.insertAdjacentHTML('beforeend', '<div class="muted">没有匹配页面。</div>');
 }
@@ -349,9 +422,7 @@ function appendTransitionList(box, title, transitions, outgoing) {
   transitions.forEach((transition) => {
     const row = document.createElement('div');
     row.className = 'transitionRow';
-    const route = outgoing
-      ? `${transition.from_page} -> ${transition.to_page}`
-      : `${transition.from_page} -> ${transition.to_page}`;
+    const route = `${transition.from_page} -> ${transition.to_page}`;
     row.innerHTML = `
       <div class="transitionMain">
         <strong>${escapeHtml(route)}</strong>
