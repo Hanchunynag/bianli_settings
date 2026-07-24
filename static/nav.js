@@ -1,7 +1,7 @@
 import { api, postJson, requestJson } from './nav/api.js';
 import { el } from './nav/dom.js';
 import { store } from './nav/state.js?v=tree-directory-5';
-import { render, renderOverlay } from './nav/render.js?v=page-identity-1';
+import { render, renderOverlay, showOrphanPages } from './nav/render.js?v=orphan-manager-1';
 
 const consoleAction = (action, payload = {}) => postJson('/api/console_action', { action, payload });
 const recordAction = (action, payload = {}) => postJson('/api/record_action', { action, payload });
@@ -28,6 +28,7 @@ function bindCommandButtons() {
   el('captureBtn').onclick = async () => render(await consoleAction('capture_current'));
   el('backBtn').onclick = async () => render(await consoleAction('system_back'));
   el('clearPendingBtn').onclick = async () => render(await consoleAction('clear_pending'));
+  el('orphanPagesBtn').onclick = () => showOrphanPages();
   Object.entries(recorderModes).forEach(([mode, [buttonId]]) => {
     el(buttonId).onclick = () => toggleRecorderMode(mode);
   });
