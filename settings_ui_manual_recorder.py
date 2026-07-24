@@ -871,9 +871,11 @@ def current_session_page(work_dir: Path) -> str:
 
 def copy_stored_page_context(detected: Dict[str, Any], stored: Dict[str, Any], page_name: str) -> Dict[str, Any]:
     state = {**detected, "page_name": page_name, "raw_page_name": state_raw_page_name(detected)}
-    for key in ("parent_page", "parent_title", "page_description", "state_type", "is_overlay", "overlay_parent", "overlay_title"):
+    for key in ("parent_page", "parent_title"):
         if key in stored:
             state[key] = stored[key]
+    if detected.get("is_overlay") and "overlay_parent" in stored:
+        state["overlay_parent"] = stored["overlay_parent"]
     return state
 
 
