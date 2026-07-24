@@ -82,6 +82,42 @@ export async function refreshDirectory() {
   }
 }
 
+export async function showOrphanPages() {
+  const data = await requestJson('/api/page_directory').catch((err) => ({ ok: false, error: err.message }));
+  if (!data.ok) return showError(data.error || '加载孤儿页面失败');
+
+  store.selectedPage = '';
+  const box = el('pageDetail');
+  clear(box);
+  hideGraphBox();
+  const orphans = (data.flat_pages || []).filter((page) => page.is_orphan);
+  box.innerHTML = `<h3>孤儿页面管理</h3><p class="muted">以下页面没有 parent_page、overlay_parent、base_page，也没有任何导航入边。</p>`;
+
+  if (!orphans.length) {
+    box.insertAdjacentHTML('beforeend', '<div class="muted">当前没有孤儿页面。</div>');
+    return;
+  }
+
+  orphans.forEach((page) => {
+    const row = document.createElement('div');
+    row.className = 'operationRow';
+    row.innerHTML = `
+      <div class="operationMain">
+        <strong>${escapeHtml(page.title || page.page_name)}</strong>
+        <code>${escapeHtml(page.page_name)}</code>
+        <span>候选控件 ${page.candidate_count || 0} · 页面操作 ${page.operation_count || 0}</span>
+      </div>
+      <div class="dirActions"></div>
+    `;
+    const actions = row.querySelector('.dirActions');
+    actions.appendChild(actionButton('详情', () => loadPageDetail(page.page_name), 'secondary compact'));
+    actions.appendChild(actionButton('删除孤儿页', () => dryRunDelete('page', {
+      page_name: page.page_name,
+    }), 'danger compact'));
+    box.appendChild(row);
+  });
+}
+
 export function render(data) {
   if (!data) return;
   store.data = data;
