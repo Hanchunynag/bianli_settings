@@ -892,9 +892,17 @@ def current_session_page(work_dir: Path) -> str:
 
 def copy_stored_page_context(detected: Dict[str, Any], stored: Dict[str, Any], page_name: str) -> Dict[str, Any]:
     state = {**detected, "page_name": page_name, "raw_page_name": state_raw_page_name(detected)}
-    for key in ("parent_page", "parent_title", "page_description", "state_type", "is_overlay", "overlay_parent", "overlay_title"):
+    for key in ("parent_page", "parent_title", "page_description"):
         if key in stored:
             state[key] = stored[key]
+
+    # Historical overlay metadata must not turn a currently detected normal page
+    # back into an overlay. Preserve it only while the current UI tree still
+    # contains a real (non-full-screen) dialog.
+    if detected.get("is_overlay"):
+        for key in ("state_type", "is_overlay", "overlay_parent", "overlay_title"):
+            if key in stored:
+                state[key] = stored[key]
     return state
 
 
