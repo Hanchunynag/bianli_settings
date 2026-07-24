@@ -497,30 +497,6 @@ def nearest_label(node: Node) -> str:
     return ""
 
 
-def is_status_bar_noise_text(text: str) -> bool:
-    if text in NOISE_TEXTS:
-        return True
-    if re.fullmatch(r"\d+", text):
-        return True
-    if re.fullmatch(r"\d{1,2}:\d{2}", text):
-        return True
-    if re.fullmatch(r"\d+%", text):
-        return True
-    if re.fullmatch(r"[\d.]+\s*[KMG]?B/s", text, flags=re.IGNORECASE):
-        return True
-    return False
-
-
-def is_page_title_candidate(node: Node) -> bool:
-    if get_type(node) != "Text" or not is_visible(node):
-        return False
-    text = clean_label(get_text(node))
-    if not text or is_status_bar_noise_text(text):
-        return False
-    rect = parse_rect(get_attr(node, "bounds"))
-    return bool(rect["valid"] and 100 <= rect["top"] <= 250)
-
-
 def is_title_key(key: str) -> bool:
     """判断控件 key 是否属于页面标题。"""
     normalized = str(key or "").strip().lower()
@@ -546,8 +522,7 @@ def find_page_title(root: Node) -> str:
             parent_name = get_key(parent) or get_type(parent)
             if "titlebar" in parent_name.lower():
                 return clean_label(text)
-    title_candidates: List[Tuple[int, int, str]] = []
-    return sorted(title_candidates)[0][2] if title_candidates else ""
+    return ""
 
 
 def find_nav_destination_key(root: Node) -> str:
