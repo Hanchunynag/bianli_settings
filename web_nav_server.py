@@ -128,7 +128,11 @@ def api_error(_request: Request, exc: Exception) -> JSONResponse:
     return error_response(str(exc))
 
 
-def read_current_state(capture: bool, persist_candidates: bool = True) -> Dict[str, Any]:
+def read_current_state(
+    capture: bool,
+    persist_candidates: bool = True,
+    preferred_page: str = "",
+) -> Dict[str, Any]:
     """采集或读取 latest 文件，更新导航图状态并返回前端需要的数据。"""
     if capture and not capture_artifacts(config.device_id, config.output_dir):
         raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
@@ -140,7 +144,7 @@ def read_current_state(capture: bool, persist_candidates: bool = True) -> Dict[s
     annotate(root_json)
     state = build_navigation_state(root_json)
     graph = load_navigation_graph(config.work_dir)
-    state = resolve_detected_state(graph, state, current_session_page(config.work_dir))
+    state = resolve_detected_state(graph, state, preferred_page or current_session_page(config.work_dir))
     existing_state = graph.get("states", {}).get(state["page_name"], {})
     if isinstance(existing_state, dict):
         preserve_keys = ["page_operations", "page_variants", "merged_candidates"]
@@ -808,9 +812,40 @@ def api_swipe_horizontal(req: SwipeHorizontalRequest) -> JSONResponse:
 
 @app.post("/api/back")
 def api_back() -> JSONResponse:
+    graph = load_navigation_graph(config.work_dir)
+    active_page = current_session_page(config.work_dir)
+    active_state = graph.get("states", {}).get(active_page, {})
+    parent_page = str(
+        active_state.get("parent_page")
+        or active_state.get("base_page")
+        or ""
+    )
+
+    if not parent_page and active_page:
+        incoming_pages = list(dict.fromkeys(
+            str(transition.get("from_page") or "")
+            for transition in graph.get("transitions", [])
+            if transition.get("to_page") == active_page
+            and transition.get("from_page") != active_page
+        ))
+        incoming_pages = [page for page in incoming_pages if page]
+        if len(incoming_pages) == 1:
+            parent_page = incoming_pages[0]
+
     execute_back(config.device_id)
     time.sleep(1.0)
-    return ok_response(**read_current_state(capture=True))
+    current = read_current_state(
+        capture=True,
+        preferred_page=parent_page,
+    )
+    resolved_page = str(
+        current.get("active_page")
+        or current.get("state", {}).get("page_name")
+        or ""
+    )
+    if resolved_page:
+        save_current_path_session(config.work_dir, resolved_page)
+    return ok_response(**current)
 
 
 def clear_pending_files() -> None:
