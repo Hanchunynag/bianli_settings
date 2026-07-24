@@ -557,11 +557,32 @@ def state_name_from_title(title: str, overlay: bool = False) -> str:
 
 def detect_dialog_root(root: Node) -> Optional[Node]:
     # Transient popup menus are part of a transition step, not standalone pages.
-    # Only explicit dialogs are promoted to overlay states.
-    candidates = find_all(root, lambda n: is_visible(n) and "dialog" in (get_type(n) + get_key(n)).lower())
+    # A full-screen Dialog may only be the container of a normal settings page,
+    # so only dialogs that are clearly smaller than the screen are overlays.
+    screen = screen_metrics_from_root(root).get("screen_size") or [0, 0]
+    screen_area = (
+        int(screen[0] or 0) * int(screen[1] or 0)
+        if isinstance(screen, list) and len(screen) == 2
+        else 0
+    )
+    candidates = []
+    for node in find_all(
+        root,
+        lambda n: is_visible(n)
+        and "dialog" in (get_type(n) + get_key(n)).lower(),
+    ):
+        rect = parse_rect(get_attr(node, "bounds"))
+        if not rect["valid"]:
+            continue
+        if screen_area and rect["area"] >= screen_area * 0.85:
+            continue
+        candidates.append(node)
     if not candidates:
         return None
-    return max(candidates, key=lambda n: parse_rect(get_attr(n, "bounds"))["area"])
+    return max(
+        candidates,
+        key=lambda n: parse_rect(get_attr(n, "bounds"))["area"],
+    )
 
 
 def detect_overlay_title(root: Node) -> str:
