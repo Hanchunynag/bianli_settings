@@ -111,9 +111,10 @@ export async function showOrphanPages() {
     `;
     const actions = row.querySelector('.dirActions');
     actions.appendChild(actionButton('详情', () => loadPageDetail(page.page_name), 'secondary compact'));
-    actions.appendChild(actionButton('删除孤儿页', () => dryRunDelete('page', {
-      page_name: page.page_name,
-    }), 'danger compact'));
+    actions.appendChild(actionButton('删除孤儿页', async () => {
+      await dryRunDelete('page', { page_name: page.page_name });
+      await showOrphanPages();
+    }, 'danger compact'));
     box.appendChild(row);
   });
 }
