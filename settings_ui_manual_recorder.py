@@ -1442,15 +1442,28 @@ def build_page_directory(graph: Dict[str, Any]) -> Dict[str, Any]:
         return {"page_name": page, "title": state_title(st, page), "children": children}
     flat = []
     for page, st in states.items():
+        owner_page = str(
+            st.get("parent_page")
+            or st.get("overlay_parent")
+            or st.get("base_page")
+            or ""
+        )
+        is_orphan = (
+            page != "Pages_root"
+            and not owner_page
+            and not incoming.get(page)
+        )
         flat.append({
             "page_name": page,
             "title": state_title(st, page),
+            "parent_page": owner_page,
             "incoming_count": len(incoming.get(page, [])),
             "outgoing_count": len(outgoing.get(page, [])),
             "candidate_count": len(st.get("merged_candidates", []) or []),
             "operation_count": len(st.get("page_operations", []) or []),
             "continued_capture_count": len(st.get("continued_captures", []) or []),
             "is_overlay": bool(st.get("is_overlay")),
+            "is_orphan": is_orphan,
             "state_type": st.get("state_type") or ("overlay" if st.get("is_overlay") else "page"),
         })
     return {"root": "Pages_root", "items": [node("Pages_root", {"Pages_root"})] if "Pages_root" in states else [], "flat_pages": sorted(flat, key=lambda x: x["page_name"])}
