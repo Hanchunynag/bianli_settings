@@ -460,9 +460,27 @@ function transitionSteps(transition) {
 
 function stepLabel(step) {
   const target = step.target || {};
-  const name = target.step_prompt || target.key_description || target.text || target.value || target.key || '未知控件';
-  const locator = target.key ? ` key=${target.key}` : '';
-  return `${step.operate || 'tap'} ${name}${locator}`;
+  const operate = step.operate || 'tap';
+
+  const key =
+    target.key ||
+    (target.type === 'key' ? target.value : '');
+
+  const name =
+    target.step_prompt ||
+    target.key_description ||
+    target.text ||
+    '';
+
+  if (key && name && name !== key) {
+    return `${operate} ${name} [key=${key}]`;
+  }
+
+  if (key) {
+    return `${operate} key=${key}`;
+  }
+
+  return `${operate} ${name || target.value || '未知控件'}`;
 }
 
 function operationLabel(operation) {

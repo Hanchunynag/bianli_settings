@@ -345,12 +345,12 @@ def record_page_gesture_operation(x: int, y: int, operate: str, effect: str = ""
 def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = "", manual_label: str = "") -> Dict[str, Any]:
     chain = pending_action_chain(config.work_dir)
     if chain:
-        before = capture_state_without_graph_write()
-        root_json = before["root"]
-        current = state_response_from_capture(root_json, before["state"], load_navigation_graph(config.work_dir), str(chain["from_page"]))
+        current = read_current_state(capture=False)
+        root_json = load_json(config.output_dir / "current_ui_tree.json")
+        annotate(root_json)
         from_page = str(chain["from_page"])
     else:
-        current = read_current_state(capture=True)
+        current = read_current_state(capture=False)
         ensure_page_consistency(current)
         root_json = load_json(config.output_dir / "current_ui_tree.json")
         annotate(root_json)

@@ -664,20 +664,136 @@ def extract_navigation_candidates(root: Node) -> List[Dict[str, Any]]:
     return candidates
 
 
-def hit_test_full_ui_tree(root: Node, x: int, y: int) -> Optional[Dict[str, Any]]:
+def hit_test_full_ui_tree(
+    root: Node,
+    x: int,
+    y: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    点击命中规则：
+
+    1. 如果点击点位于 ListItem/GridItem 中：
+       - 选择最深层 Item；
+       - 在该 Item 内找第一个 clickable；
+       - 不进入其他嵌套 ListItem/GridItem。
+
+    2. clickable 自身有稳定 key/text 时直接使用；
+       否则分别从 clickable 内部补充缺失的 key/text。
+
+    3. 如果点击点不属于任何 Item，则使用原来的坐标命中逻辑。
+    """
+    item_types = {"ListItem", "GridItem"}
+
     screen = screen_metrics_from_root(root).get("screen_size") or [0, 0]
-    screen_area = int(screen[0] or 0) * int(screen[1] or 0) if isinstance(screen, list) and len(screen) == 2 else 0
-    hits: List[Tuple[Tuple[int, int], Node]] = []
+    screen_area = (
+        int(screen[0] or 0) * int(screen[1] or 0)
+        if len(screen) == 2
+        else 0
+    )
+
+    item_hits = []
     for node, depth, _ in walk(root):
-        rect = parse_rect(get_attr(node, "bounds"))
-        if not rect["valid"] or not (rect["left"] <= x <= rect["right"] and rect["top"] <= y <= rect["bottom"]):
+        if get_type(node) not in item_types:
             continue
-        if is_recordable_clickable_area(node, screen_area):
-            hits.append(((int(rect["area"]), -depth), node))
-    if not hits:
+
+        rect = parse_rect(get_attr(node, "bounds"))
+        if not rect["valid"]:
+            continue
+
+        if (
+            rect["left"] <= x <= rect["right"]
+            and rect["top"] <= y <= rect["bottom"]
+        ):
+            item_hits.append((depth, rect["area"], node))
+
+    item_node = None
+    if item_hits:
+        item_hits.sort(key=lambda item: (-item[0], item[1]))
+        item_node = item_hits[0][2]
+
+    clickable_node = None
+    if item_node:
+        stack = [item_node]
+
+        while stack:
+            node = stack.pop()
+
+            if node is not item_node and get_type(node) in item_types:
+                continue
+
+            if is_recordable_clickable_area(node, screen_area):
+                clickable_node = node
+                break
+
+            stack.extend(reversed(children(node)))
+
+    if clickable_node is None and item_node is None:
+        hits = []
+
+        for node, depth, _ in walk(root):
+            rect = parse_rect(get_attr(node, "bounds"))
+            if not rect["valid"]:
+                continue
+
+            if not (
+                rect["left"] <= x <= rect["right"]
+                and rect["top"] <= y <= rect["bottom"]
+            ):
+                continue
+
+            if is_recordable_clickable_area(node, screen_area):
+                hits.append((rect["area"], -depth, node))
+
+        if hits:
+            hits.sort(key=lambda item: (item[0], item[1]))
+            clickable_node = hits[0][2]
+
+    if clickable_node is None:
         return None
-    hits.sort(key=lambda item: item[0])
-    return node_semantic_summary(hits[0][1])
+
+    key = get_key(clickable_node)
+    text = clean_label(get_text(clickable_node))
+
+    if not is_stable_key_for_navigation(key):
+        key = ""
+
+    if not is_stable_text_for_navigation(text):
+        text = ""
+
+    if not key or not text:
+        stack = list(reversed(children(clickable_node)))
+
+        while stack:
+            node = stack.pop()
+
+            if get_type(node) in item_types:
+                continue
+
+            if not key:
+                child_key = get_key(node)
+                if is_stable_key_for_navigation(child_key):
+                    key = child_key
+
+            if not text:
+                child_text = clean_label(get_text(node))
+                if is_stable_text_for_navigation(child_text):
+                    text = child_text
+
+            if key and text:
+                break
+
+            stack.extend(reversed(children(node)))
+
+    return {
+        "component_type": get_type(clickable_node),
+        "key": key,
+        "text": text,
+        "bounds": get_attr(clickable_node, "bounds"),
+        "clickable": True,
+        "enabled": is_enabled(clickable_node),
+        "item_type": get_type(item_node) if item_node else "",
+        "item_bounds": get_attr(item_node, "bounds") if item_node else "",
+    }
 
 
 def build_semantic_target_from_node(hit_node: Optional[Dict[str, Any]], manual_label: str = "") -> Dict[str, Any]:
