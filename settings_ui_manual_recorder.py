@@ -558,7 +558,7 @@ def state_name_from_title(title: str, overlay: bool = False) -> str:
 def detect_dialog_root(root: Node) -> Optional[Node]:
     # Transient popup menus are part of a transition step, not standalone pages.
     # Only explicit dialogs are promoted to overlay states.
-    candidates = find_all(root, lambda n: is_visible(n) and "dialog" in (get_type(n) + get_key(n)).lower())
+    candidates = find_all(root, lambda n: is_visible(n) and get_type(n) == "Dialog")
     if not candidates:
         return None
     return max(candidates, key=lambda n: parse_rect(get_attr(n, "bounds"))["area"])
