@@ -1,14 +1,12 @@
 import { api, postJson, requestJson } from './nav/api.js';
 import { el } from './nav/dom.js';
-import { store } from './nav/state.js?v=tree-directory-5';
-import { render, renderOverlay } from './nav/render.js?v=tree-directory-5';
+import { store } from './nav/state.js?v=page-identity-1';
+import { render, renderOverlay } from './nav/render.js?v=page-identity-1';
 
 const consoleAction = (action, payload = {}) => postJson('/api/console_action', { action, payload });
 const recordAction = (action, payload = {}) => postJson('/api/record_action', { action, payload });
 const recorderModes = {
-  samePageMode: ['samePageModeBtn', '开始记录同页点击变化', '停止记录同页点击变化'],
   popupMode: ['popupModeBtn', '开始记录弹窗操作', '停止记录弹窗操作'],
-  pageOperationMode: ['pageOperationModeBtn', '开始记录同页手势', '停止记录同页手势'],
 };
 
 function toggleRecorderMode(selectedMode) {
@@ -23,12 +21,6 @@ function toggleRecorderMode(selectedMode) {
 function screenRecordRequest(x, y) {
   const point = { x, y, manual_label: '' };
   if (store.popupMode) return ['popup_tap', point];
-  if (store.pageOperationMode) return ['same_page_gesture', {
-    ...point,
-    operate: el('operationGesture').value,
-    effect: el('operationEffect').value.trim(),
-  }];
-  if (store.samePageMode) return ['same_page_tap', point];
   return ['tap_point', { ...point, expect: 'new_page', effect: '' }];
 }
 
@@ -36,10 +28,6 @@ function bindCommandButtons() {
   el('captureBtn').onclick = async () => render(await consoleAction('capture_current'));
   el('backBtn').onclick = async () => render(await consoleAction('system_back'));
   el('clearPendingBtn').onclick = async () => render(await consoleAction('clear_pending'));
-  el('markOverlayBtn').onclick = async () => render(await consoleAction('mark_overlay'));
-  el('continuePageBtn').onclick = async () => render(await consoleAction('continue_current_page'));
-  el('swipeLeftBtn').onclick = async () => render(await consoleAction('swipe_horizontal', { direction: 'left' }));
-  el('swipeRightBtn').onclick = async () => render(await consoleAction('swipe_horizontal', { direction: 'right' }));
   Object.entries(recorderModes).forEach(([mode, [buttonId]]) => {
     el(buttonId).onclick = () => toggleRecorderMode(mode);
   });

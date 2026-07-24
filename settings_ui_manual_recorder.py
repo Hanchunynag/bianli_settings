@@ -883,15 +883,29 @@ def resolve_detected_state(graph: Dict[str, Any], detected: Dict[str, Any], pref
     current_name = str(state.get("page_name") or "")
     if current_name and current_name != raw_name and state.get("parent_page"):
         return state
+    states = graph.get("states", {})
+    preferred = states.get(preferred_page, {}) if preferred_page else {}
+    if (
+        isinstance(preferred, dict)
+        and preferred
+        and states_represent_same_page(state, preferred)
+    ):
+        return copy_stored_page_context(state, preferred, preferred_page)
     if raw_name == "Pages_root":
         state["page_name"] = raw_name
         return state
-    states = graph.get("states", {})
-    preferred = states.get(preferred_page, {}) if preferred_page else {}
-    if isinstance(preferred, dict) and state_raw_page_name(preferred, preferred_page) == raw_name:
-        return copy_stored_page_context(state, preferred, preferred_page)
     matches = [(str(name), stored) for name, stored in states.items() if isinstance(stored, dict) and state_raw_page_name(stored, str(name)) == raw_name]
     return copy_stored_page_context(state, matches[0][1], matches[0][0]) if len(matches) == 1 else state
+
+
+def state_signature_texts(state: Dict[str, Any]) -> Set[str]:
+    signature = state.get("signature") or {}
+    title = clean_label(signature.get("title") or state.get("last_title"))
+    return {
+        text
+        for value in signature.get("texts_any") or []
+        if (text := clean_label(value)) and text != title
+    }
 
 
 def states_represent_same_page(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
@@ -899,7 +913,20 @@ def states_represent_same_page(left: Dict[str, Any], right: Dict[str, Any]) -> b
     if not left_name or left_name != state_raw_page_name(right):
         return False
     left_nav, right_nav = str(left.get("nav_key") or ""), str(right.get("nav_key") or "")
-    return left_nav == right_nav if left_nav and right_nav else True
+    if left_nav and right_nav:
+        return left_nav == right_nav
+    if left_name != "Pages_root":
+        return True
+
+    # “设置”不只会出现在真正的设置首页标题中。双方都被标题规则暂时
+    # 命名为 Pages_root 时，继续比较页面内稳定文本，避免把同名子页面
+    # 当成仍停留在根页或临时弹层。
+    left_texts = state_signature_texts(left)
+    right_texts = state_signature_texts(right)
+    if not left_texts or not right_texts:
+        return True
+    shared = len(left_texts & right_texts)
+    return shared >= max(1, (min(len(left_texts), len(right_texts)) + 1) // 2)
 
 
 def state_matches_graph_page(graph: Dict[str, Any], detected: Dict[str, Any], page_name: str) -> bool:
@@ -919,12 +946,25 @@ def rename_graph_page(graph: Dict[str, Any], old_name: str, new_name: str) -> No
                 transition[field] = new_name
 
 
-def contextualize_child_state(graph: Dict[str, Any], from_page: str, detected: Dict[str, Any]) -> Dict[str, Any]:
+def contextualize_child_state(
+    graph: Dict[str, Any],
+    from_page: str,
+    detected: Dict[str, Any],
+    via_target: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     state = dict(detected)
     raw_name = state_raw_page_name(state)
     parent_title = state_display_title(graph.get("states", {}).get(from_page, {"page_name": from_page}), from_page)
     child_title = state_display_title(state, raw_name)
-    contextual_title = f"{parent_title} to{child_title}"
+    target_title = clean_label(
+        (via_target or {}).get("step_prompt")
+        or (via_target or {}).get("key_description")
+        or (via_target or {}).get("text")
+        or (via_target or {}).get("value")
+        or (via_target or {}).get("key")
+    )
+    route_title = target_title if child_title == parent_title and target_title else child_title
+    contextual_title = f"{parent_title} to{route_title}"
     contextual_name = state_name_from_title(contextual_title, overlay=bool(state.get("is_overlay")))
     matching = []
     for transition in graph.get("transitions", []):

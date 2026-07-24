@@ -98,10 +98,8 @@ export function render(data) {
 
   el('warning').textContent = data.warning || '';
   el('warning').classList.toggle('hidden', !data.warning);
-  const modeMsg = store.samePageMode ? '当前模式：记录同页点击变化。点击截图中的控件后，会补采并合并当前页面内容。' : '';
-  const operationModeMsg = store.pageOperationMode ? '当前模式：记录同页手势。选择手势和变化结果后，点击截图中的操作区域。' : '';
   const popupModeMsg = store.popupMode ? '当前模式：记录弹窗操作。点击截图中的控件后，将保存为当前页面的 operation。' : '';
-  const overlayMsg = data.message || popupModeMsg || modeMsg || operationModeMsg || (data.state?.is_overlay ? '当前页面已标记为弹窗页面' : '');
+  const overlayMsg = data.message || popupModeMsg || (data.state?.is_overlay ? '当前页面已识别为弹窗页面' : '');
   el('overlayStatus').textContent = overlayMsg;
   el('overlayStatus').classList.toggle('hidden', !overlayMsg);
 

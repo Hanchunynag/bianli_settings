@@ -56,7 +56,6 @@ from settings_ui_manual_recorder import (
     capture_ui_tree_only,
     contextualize_child_state,
     current_session_page,
-    detect_overlay_title,
     execute_back,
     execute_gesture_operation,
     execute_horizontal_swipe,
@@ -380,7 +379,7 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
         )
     else:
         after_capture["state"] = contextualize_child_state(
-            graph, from_page, after_capture["state"]
+            graph, from_page, after_capture["state"], target
         )
     after = state_response_from_capture(
         after_capture["root"],
@@ -450,8 +449,6 @@ def api_console_action(req: ConsoleActionRequest) -> JSONResponse:
     if action == "clear_pending":
         clear_pending_files()
         return ok_response(**read_current_state(capture=False), message="已清空待确认跳转。")
-    if action == "mark_overlay":
-        return api_mark_current_as_overlay()
     if action == "continue_current_page":
         return api_continue_current_page()
     if action == "swipe_horizontal":
@@ -519,23 +516,6 @@ def api_record_action(req: RecordActionRequest) -> JSONResponse:
 @app.post("/api/tap_candidate")
 def api_tap_candidate(req: TapCandidateRequest) -> JSONResponse:
     return ok_response(**record_candidate(req.index, req.expect, req.effect, req.manual_label))
-
-
-@app.post("/api/mark_current_as_overlay")
-def api_mark_current_as_overlay() -> JSONResponse:
-    current = read_current_state(capture=False)
-    root_json = load_json(config.output_dir / "current_ui_tree.json")
-    annotate(root_json)
-    title = detect_overlay_title(root_json) or current["state"].get("last_title") or "未知弹窗"
-    page_name = current["state"].get("page_name") or current.get("active_page")
-    graph = load_navigation_graph(config.work_dir)
-    parent = current.get("active_page") or (pending_data(config.work_dir) or {}).get("from_page") or ""
-    graph.setdefault("states", {}).setdefault(page_name, current["state"]).update({
-        "state_type": "overlay", "is_overlay": True, "overlay_parent": parent,
-        "overlay_title": title, "page_description": f"弹窗：{title}", "last_title": title,
-    })
-    save_navigation_graph(graph, config.work_dir)
-    return ok_response(**read_current_state(capture=False), message="当前页面已标记为弹窗页面")
 
 
 @app.get("/api/page_directory")
