@@ -145,6 +145,7 @@ def read_current_state(
     state = build_navigation_state(root_json)
     graph = load_navigation_graph(config.work_dir)
     state = resolve_detected_state(graph, state, preferred_page or current_session_page(config.work_dir))
+    resolved_existing_page = state["page_name"] in graph.get("states", {})
     existing_state = graph.get("states", {}).get(state["page_name"], {})
     if isinstance(existing_state, dict):
         preserve_keys = ["page_operations", "page_variants", "merged_candidates"]
@@ -157,6 +158,12 @@ def read_current_state(
         for c in candidates:
             upsert_candidate(state_entry, candidate_from_auto(c, source="auto_detected"))
         save_navigation_graph(graph, config.work_dir)
+    if resolved_existing_page:
+        save_current_path_session(
+            config.work_dir,
+            state["page_name"],
+            str(state.get("base_page") or ""),
+        )
     active_state = active_navigation_state(config.work_dir, graph, state)
     active_page = active_state.get("page_name")
     merged_candidates = get_page_merged_candidates(graph, str(active_page or state["page_name"]), candidates)
