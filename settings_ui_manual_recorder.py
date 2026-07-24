@@ -915,9 +915,30 @@ def resolve_detected_state(graph: Dict[str, Any], detected: Dict[str, Any], pref
         if isinstance(stored, dict)
         and state_raw_page_name(stored, str(name)) == raw_name
     ]
+
+    # 同一个标题可能同时留下“短名孤儿”和“带路径的已录制节点”。
+    # 刷新时应优先恢复有明确父级或导航入边的节点，不能让孤儿短名
+    # Pages_xxx 覆盖 Pages_父页_toxxx 的页面归属。
+    resolution_matches = matches
+    if raw_name != "Pages_root":
+        parented_matches = [
+            item for item in matches
+            if str(item[1].get("parent_page") or "")
+        ]
+        incoming_names = {
+            str(transition.get("to_page") or "")
+            for transition in graph.get("transitions", [])
+            if transition.get("from_page") != transition.get("to_page")
+        }
+        connected_matches = [
+            item for item in matches
+            if item[0] in incoming_names
+        ]
+        resolution_matches = parented_matches or connected_matches or matches
+
     scored = sorted(
         (state_signature_score(state, stored), name, stored)
-        for name, stored in matches
+        for name, stored in resolution_matches
     )
     if scored and scored[-1][0] >= 3:
         best_score = scored[-1][0]
@@ -959,7 +980,15 @@ def resolve_detected_state(graph: Dict[str, Any], detected: Dict[str, Any], pref
                 )
         state["page_name"] = raw_name
         return state
-    return copy_stored_page_context(state, matches[0][1], matches[0][0]) if len(matches) == 1 else state
+    return (
+        copy_stored_page_context(
+            state,
+            resolution_matches[0][1],
+            resolution_matches[0][0],
+        )
+        if len(resolution_matches) == 1
+        else state
+    )
 
 
 def state_signature_texts(state: Dict[str, Any]) -> Set[str]:
