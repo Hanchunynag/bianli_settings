@@ -13,11 +13,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import subprocess
-from collections import defaultdict
+import uuid
+from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pydantic import BaseModel
 
@@ -59,6 +61,7 @@ COORDINATE_RECORD_VALUES = {
     "normalized_center",
     "normalized_point",
 }
+LEGACY_LOCATOR_TYPES = {"key", "text", "button", "button_text", "manual"}
 
 
 def now_iso() -> str:
@@ -108,71 +111,57 @@ def run_hdc_with_fallback(commands: List[List[str]], action: str) -> None:
     raise RuntimeError(f"{action} 失败：" + " | ".join(errors))
 
 
-def execute_tap(device_id: str, center: List[int]) -> None:
-    if not isinstance(center, list) or len(center) != 2:
-        raise ValueError("candidate.bounds_center 必须是 [x, y]")
-    x, y = map(int, center)
+def execute_device_input(
+    device_id: str,
+    action: str,
+    center: Optional[List[int]] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+) -> None:
     base = ["hdc", "-t", device_id, "shell"]
-    run_hdc_with_fallback([
-        base + ["uitest", "uiInput", "click", str(x), str(y)],
-        base + ["input", "tap", str(x), str(y)],
-    ], f"点击 [{x}, {y}]")
-
-
-def execute_back(device_id: str) -> None:
-    base = ["hdc", "-t", device_id, "shell"]
-    run_hdc_with_fallback([
-        base + ["uitest", "uiInput", "keyEvent", "Back"],
-        base + ["input", "keyevent", "BACK"],
-    ], "返回")
-
-
-def execute_horizontal_swipe(device_id: str, direction: str, metrics: Dict[str, Any]) -> None:
-    width, height = map(int, metrics.get("screen_size") or [1080, 2400])
-    y = int(height * 0.55)
-    if direction not in {"left", "right"}:
-        raise ValueError("direction 必须是 left 或 right")
-    x1, x2 = (int(width * 0.78), int(width * 0.22)) if direction == "left" else (int(width * 0.22), int(width * 0.78))
-    base = ["hdc", "-t", device_id, "shell"]
-    run_hdc_with_fallback([
-        base + ["uitest", "uiInput", "swipe", str(x1), str(y), str(x2), str(y), "600"],
-        base + ["input", "swipe", str(x1), str(y), str(x2), str(y), "600"],
-    ], f"横向{direction}滑动")
-
-
-def execute_gesture_operation(device_id: str, operate: str, center: List[int], metrics: Dict[str, Any]) -> None:
-    if not isinstance(center, list) or len(center) != 2:
-        raise ValueError("center 必须是 [x, y]")
-    x, y = map(int, center)
-    width, height = map(int, metrics.get("screen_size") or [1080, 2400])
-    dx, dy = max(160, int(width * 0.22)), max(180, int(height * 0.12))
-    if operate == "tap":
-        return execute_tap(device_id, [x, y])
-    gestures = {
-        "long_press": (x, y, x, y, "900"),
-        "swipe_left": (x + dx // 2, y, x - dx // 2, y, "600"),
-        "swipe_right": (x - dx // 2, y, x + dx // 2, y, "600"),
-        "swipe_up": (x, y + dy // 2, x, y - dy // 2, "600"),
-        "swipe_down": (x, y - dy // 2, x, y + dy // 2, "600"),
-    }
-    if operate not in gestures:
-        raise ValueError("operate 必须是 tap/long_press/swipe_left/swipe_right/swipe_up/swipe_down")
-    x1, y1, x2, y2, duration = gestures[operate]
-    base = ["hdc", "-t", device_id, "shell"]
-    run_hdc_with_fallback([
-        base + ["uitest", "uiInput", "swipe", str(x1), str(y1), str(x2), str(y2), duration],
-        base + ["input", "swipe", str(x1), str(y1), str(x2), str(y2), duration],
-    ], f"{operate} 手势")
-
-
-def format_ui_tree_json(path: Path) -> None:
-    try:
-        data = load_json(path)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"✓ 格式化 UI JSON: {path}")
-    except Exception as exc:
-        print(f"⚠ UI JSON 格式化失败，继续采集流程: {path} ({exc})")
+    if action == "back":
+        commands = [
+            base + ["uitest", "uiInput", "keyEvent", "Back"],
+            base + ["input", "keyevent", "BACK"],
+        ]
+        description = "返回"
+    else:
+        width, height = map(int, (metrics or {}).get("screen_size") or [1080, 2400])
+        if action in {"horizontal_left", "horizontal_right"}:
+            left = action == "horizontal_left"
+            x1, x2, y = (
+                int(width * (0.78 if left else 0.22)),
+                int(width * (0.22 if left else 0.78)),
+                int(height * 0.55),
+            )
+            gesture = (x1, y, x2, y, "600")
+        else:
+            if not isinstance(center, list) or len(center) != 2:
+                raise ValueError("center 必须是 [x, y]")
+            x, y = map(int, center)
+            if action == "tap":
+                commands = [
+                    base + ["uitest", "uiInput", "click", str(x), str(y)],
+                    base + ["input", "tap", str(x), str(y)],
+                ]
+                return run_hdc_with_fallback(commands, f"点击 [{x}, {y}]")
+            dx, dy = max(160, int(width * 0.22)), max(180, int(height * 0.12))
+            gestures = {
+                "long_press": (x, y, x, y, "900"),
+                "swipe_left": (x + dx // 2, y, x - dx // 2, y, "600"),
+                "swipe_right": (x - dx // 2, y, x + dx // 2, y, "600"),
+                "swipe_up": (x, y + dy // 2, x, y - dy // 2, "600"),
+                "swipe_down": (x, y - dy // 2, x, y + dy // 2, "600"),
+            }
+            if action not in gestures:
+                raise ValueError(f"未知设备操作：{action}")
+            gesture = gestures[action]
+        x1, y1, x2, y2, duration = gesture
+        commands = [
+            base + ["uitest", "uiInput", "swipe", str(x1), str(y1), str(x2), str(y2), duration],
+            base + ["input", "swipe", str(x1), str(y1), str(x2), str(y2), duration],
+        ]
+        description = f"横向{action.removeprefix('horizontal_')}滑动" if action.startswith("horizontal_") else f"{action} 手势"
+    run_hdc_with_fallback(commands, description)
 
 
 def capture_device(device_id: str, output_dir: Path, include_screen: bool) -> bool:
@@ -196,47 +185,22 @@ def capture_device(device_id: str, output_dir: Path, include_screen: bool) -> bo
             print(f"✗ {name} 失败")
             return False
         if name == "拉取 JSON":
-            format_ui_tree_json(output_dir / "current_ui_tree.json")
+            path = output_dir / "current_ui_tree.json"
+            try:
+                data = load_json(path)
+                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"✓ 格式化 UI JSON: {path}")
+            except Exception as exc:
+                print(f"⚠ UI JSON 格式化失败，继续采集流程: {path} ({exc})")
     return True
 
 
-def capture_artifacts(device_id: str, output_dir: Path) -> bool:
-    return capture_device(device_id, output_dir, include_screen=True)
-
-
-def capture_ui_tree_only(device_id: str, output_dir: Path) -> bool:
-    return capture_device(device_id, output_dir, include_screen=False)
-
-
-def navigation_dir(work_dir: Path) -> Path:
-    return work_dir / "outputs" / "navigation"
-
-
 def navigation_graph_path(work_dir: Path) -> Path:
-    return navigation_dir(work_dir) / "settings_navigation_graph.json"
+    return work_dir / "outputs" / "navigation" / "settings_navigation_graph.json"
 
 
 def pending_transition_path(work_dir: Path) -> Path:
-    return navigation_dir(work_dir) / "pending_transition.json"
-
-
-def current_path_session_path(work_dir: Path) -> Path:
-    return navigation_dir(work_dir) / "current_path_session.json"
-
-
-def empty_navigation_graph() -> Dict[str, Any]:
-    return {
-        "package_name": PACKAGE_NAME,
-        "main_page_name": MAIN_PAGE_NAME,
-        "updated_at": now_iso(),
-        "traversal_config": {
-            "strategy": "dfs",
-            "root_page": "Pages_root",
-            "default_return_policy": {"type": "system_back"},
-        },
-        "states": {},
-        "transitions": [],
-    }
+    return work_dir / "outputs" / "navigation" / "pending_transition.json"
 
 
 def strip_coordinate_fields(value: Any) -> None:
@@ -261,26 +225,78 @@ def strip_coordinate_fields(value: Any) -> None:
             strip_coordinate_fields(item)
 
 
-def sanitize_navigation_graph_records(graph: Dict[str, Any]) -> None:
-    strip_coordinate_fields(graph)
+def normalize_semantic_target_types(target: Any, preserve_type: bool = False) -> None:
+    """迁移正式 target：跳转只留 key/text，特殊操作额外保留真实组件 type。"""
+    if not isinstance(target, dict):
+        return
+    legacy_type = str(target.get("type") or "")
+    component_type = str(target.get("component_type") or "")
+    raw_value = target.get("value")
+    if legacy_type in {"key", "button"} and raw_value not in (None, "", []):
+        target.setdefault("key", raw_value)
+    elif legacy_type in {"text", "button_text"} and raw_value not in (None, "", []):
+        target.setdefault("text", raw_value)
+    if preserve_type:
+        if legacy_type in LEGACY_LOCATOR_TYPES:
+            if component_type:
+                target["type"] = component_type
+            elif legacy_type == "button" and not target.get("key") and not target.get("text"):
+                target["type"] = "button"
+            else:
+                target.pop("type", None)
+    elif legacy_type == "button" and not target.get("key") and not target.get("text"):
+        target["type"] = "button"
+    else:
+        target.pop("type", None)
+    target.pop("component_type", None)
+    target.pop("value", None)
+
+
+def normalize_navigation_graph_targets(graph: Dict[str, Any]) -> None:
+    for transition in graph.get("transitions", []) or []:
+        if not isinstance(transition, dict):
+            continue
+        normalize_semantic_target_types(transition.get("target"), preserve_type=False)
+        for step in transition.get("steps", []) or []:
+            if isinstance(step, dict):
+                normalize_semantic_target_types(step.get("target"), preserve_type=False)
+    for state in (graph.get("states") or {}).values():
+        if not isinstance(state, dict):
+            continue
+        for operation in state.get("page_operations", []) or []:
+            if isinstance(operation, dict):
+                normalize_semantic_target_types(operation.get("target"), preserve_type=True)
 
 
 def load_navigation_graph(work_dir: Path) -> Dict[str, Any]:
     path = navigation_graph_path(work_dir)
     if not path.exists():
-        return empty_navigation_graph()
+        return {
+            "package_name": PACKAGE_NAME,
+            "main_page_name": MAIN_PAGE_NAME,
+            "updated_at": now_iso(),
+            "traversal_config": {
+                "strategy": "dfs",
+                "root_page": "Pages_root",
+                "default_return_policy": {"type": "system_back"},
+            },
+            "states": {},
+            "transitions": [],
+        }
     graph = load_json(path)
     graph.setdefault("package_name", PACKAGE_NAME)
     graph.setdefault("main_page_name", MAIN_PAGE_NAME)
     graph.setdefault("states", {})
     graph.setdefault("transitions", [])
     graph.setdefault("traversal_config", {"strategy": "dfs", "root_page": "Pages_root", "default_return_policy": {"type": "system_back"}})
-    sanitize_navigation_graph_records(graph)
+    strip_coordinate_fields(graph)
+    normalize_navigation_graph_targets(graph)
     return graph
 
 
 def save_navigation_graph(graph: Dict[str, Any], work_dir: Path) -> None:
-    sanitize_navigation_graph_records(graph)
+    strip_coordinate_fields(graph)
+    normalize_navigation_graph_targets(graph)
     graph["updated_at"] = now_iso()
     save_json(graph, navigation_graph_path(work_dir), "轻量导航状态图")
 
@@ -289,94 +305,265 @@ def save_current_path_session(work_dir: Path, active_page: str, base_page: str =
     data = {"active_page": active_page}
     if base_page:
         data["base_page"] = base_page
-    save_json(data, current_path_session_path(work_dir), "当前页面会话")
+    save_json(data, work_dir / "outputs" / "navigation" / "current_path_session.json", "当前页面会话")
 
 
-def active_navigation_state(work_dir: Path, graph: Dict[str, Any], detected_state: Dict[str, Any]) -> Dict[str, Any]:
-    # The Web recorder should operate on the page currently visible in the UI
-    # tree. Historical session state is still saved for path bookkeeping, but it
-    # must not override the detected page shown in the current screenshot.
-    state = graph.get("states", {}).get(detected_state.get("page_name", ""))
-    if isinstance(state, dict):
-        active = dict(state)
-        active.update(detected_state)
-        return active
-    return detected_state
+def safe_priority(value: Any, default: int = 1000) -> int:
+    """兼容手工编辑或旧数据中的空值、非数字 priority。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _replace_page_references(value: Any, old_name: str, new_name: str) -> bool:
+    """只迁移结构化页面引用，不误改 target.text 等用户可见内容。"""
+    reference_fields = {
+        "active_page",
+        "base_page",
+        "from_page",
+        "main_page_name",
+        "page_name",
+        "parent_page",
+        "root_page",
+        "to_page",
+    }
+    changed = False
+    if isinstance(value, dict):
+        for key, item in list(value.items()):
+            if key in reference_fields and item == old_name:
+                value[key] = new_name
+                changed = True
+            elif (
+                key == "context_key"
+                and isinstance(item, str)
+                and item.startswith(f"{old_name}::")
+            ):
+                value[key] = f"{new_name}{item[len(old_name):]}"
+                changed = True
+            elif isinstance(item, (dict, list)):
+                changed = _replace_page_references(item, old_name, new_name) or changed
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                changed = _replace_page_references(item, old_name, new_name) or changed
+    return changed
+
+
+class NavigationGraph:
+    """导航图领域对象；集中维护边顺序、页面引用与兼容规则。"""
+
+    def __init__(self, graph: Dict[str, Any]) -> None:
+        if not isinstance(graph, dict):
+            raise ValueError("navigation graph 必须是对象")
+        self.graph = graph
+        self.states = graph.setdefault("states", {})
+        self.transitions = graph.setdefault("transitions", [])
+        if not isinstance(self.states, dict):
+            raise ValueError("navigation graph states 必须是对象")
+        if not isinstance(self.transitions, list):
+            raise ValueError("navigation graph transitions 必须是数组")
+
+    def add_transition(self, transition: Dict[str, Any]) -> None:
+        tid = str(transition.get("transition_id") or "")
+        if not tid:
+            raise ValueError("transition 缺少 transition_id")
+        self.transitions[:] = [
+            item
+            for item in self.transitions
+            if not isinstance(item, dict) or item.get("transition_id") != tid
+        ]
+        self.transitions.append(transition)
+
+    def reorder_children(
+        self,
+        parent_page: str,
+        ordered_transition_ids: List[str],
+    ) -> List[str]:
+        """按完整同级 transition ID 顺序写 priority 并物理重排。"""
+        parent_page = str(parent_page or "").strip()
+        if parent_page not in self.states:
+            raise ValueError(f"父页面不存在：{parent_page}")
+        transitions = [
+            transition
+            for transition in self.transitions
+            if isinstance(transition, dict)
+            and transition.get("from_page") == parent_page
+            and transition.get("to_page") != parent_page
+        ]
+        current_ids = [
+            str(transition.get("transition_id") or "")
+            for transition in transitions
+        ]
+        if any(not transition_id for transition_id in current_ids):
+            raise ValueError(f"{parent_page} 存在缺少 transition_id 的跳转，无法持久化顺序")
+        if len(current_ids) != len(set(current_ids)):
+            raise ValueError(f"{parent_page} 存在重复 transition_id，无法持久化顺序")
+        requested_ids = [
+            str(transition_id or "").strip()
+            for transition_id in ordered_transition_ids
+        ]
+        if not requested_ids or any(not transition_id for transition_id in requested_ids):
+            raise ValueError("同级 transition 顺序不能为空")
+        if len(requested_ids) != len(set(requested_ids)):
+            raise ValueError("同级 transition 顺序包含重复 transition_id")
+        missing = [item for item in current_ids if item not in requested_ids]
+        extra = [item for item in requested_ids if item not in current_ids]
+        if missing or extra:
+            raise ValueError(f"同级 transition 集合不一致：缺少 {missing}，多出 {extra}")
+
+        priorities = {
+            transition_id: (index + 1) * 10
+            for index, transition_id in enumerate(requested_ids)
+        }
+        ordered = {
+            str(transition.get("transition_id") or ""): transition
+            for transition in transitions
+        }
+        for transition_id, priority in priorities.items():
+            ordered[transition_id]["priority"] = priority
+
+        sibling_object_ids = {id(transition) for transition in transitions}
+        ordered_iter = iter(ordered[transition_id] for transition_id in requested_ids)
+        for index, transition in enumerate(self.transitions):
+            if id(transition) in sibling_object_ids:
+                self.transitions[index] = next(ordered_iter)
+        return requested_ids
+
+    def ordered_outgoing(
+        self,
+        *,
+        valid_states_only: bool = True,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        outgoing: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        record_orders: Dict[int, int] = {}
+        for index, transition in enumerate(self.transitions):
+            if not isinstance(transition, dict):
+                continue
+            source = str(transition.get("from_page") or "")
+            target = str(transition.get("to_page") or "")
+            if not source or not target or source == target:
+                continue
+            if valid_states_only and (source not in self.states or target not in self.states):
+                continue
+            outgoing[source].append(transition)
+            record_orders[id(transition)] = index
+        for siblings in outgoing.values():
+            siblings.sort(key=lambda transition: (
+                safe_priority(transition.get("priority")),
+                record_orders[id(transition)],
+                str(transition.get("transition_id") or ""),
+            ))
+        return outgoing
+
+    def rename_page(
+        self,
+        old_name: str,
+        new_name: str,
+        *,
+        new_title: str = "",
+    ) -> Dict[str, Any]:
+        if old_name not in self.states:
+            raise ValueError(f"页面不存在：{old_name}")
+        if new_name != old_name and new_name in self.states:
+            raise ValueError(f"目标 page_name 已存在：{new_name}")
+        state = self.states[old_name]
+        if not isinstance(state, dict):
+            raise ValueError(f"页面数据不是对象：{old_name}")
+        if new_name != old_name:
+            self.states.pop(old_name)
+            self.states[new_name] = state
+            _replace_page_references(self.graph, old_name, new_name)
+        state["page_name"] = new_name
+        if new_title.strip():
+            state["last_title"] = new_title.strip()
+            state["page_description"] = new_title.strip()
+        return state
+
+
+class NavigationGraphRepository:
+    """统一导航图文件、唯一备份及录制期引用迁移。"""
+
+    RUNTIME_REFERENCE_FILES = (
+        "current_path_session.json",
+        "pending_transition.json",
+        "pending_action_chain.json",
+    )
+
+    def __init__(self, work_dir: Path) -> None:
+        self.work_dir = Path(work_dir)
+        self.path = navigation_graph_path(self.work_dir)
+
+    def load(self) -> Dict[str, Any]:
+        return load_navigation_graph(self.work_dir)
+
+    def save(self, graph: Dict[str, Any]) -> None:
+        save_navigation_graph(graph, self.work_dir)
+
+    def backup(self) -> str:
+        backup_dir = self.path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / (
+            f"settings_navigation_graph_{datetime.now().strftime('%Y%m%dT%H%M%S%f')}_"
+            f"{uuid.uuid4().hex[:8]}.json"
+        )
+        if self.path.exists():
+            shutil.copy2(self.path, backup_path)
+        return str(backup_path)
+
+    def rename_runtime_references(self, old_name: str, new_name: str) -> List[str]:
+        changed_files: List[str] = []
+        for filename in self.RUNTIME_REFERENCE_FILES:
+            path = self.path.parent / filename
+            if not path.exists():
+                continue
+            try:
+                document = load_json(path)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if _replace_page_references(document, old_name, new_name):
+                save_json(document, path, f"页面引用迁移 {filename}")
+                changed_files.append(str(path))
+        return changed_files
 
 
 def add_transition(graph: Dict[str, Any], transition: Dict[str, Any]) -> None:
-    tid = str(transition.get("transition_id") or "")
-    if not tid:
-        raise ValueError("transition 缺少 transition_id")
-    graph["transitions"] = [t for t in graph.get("transitions", []) if t.get("transition_id") != tid]
-    graph.setdefault("transitions", []).append(transition)
+    """兼容旧调用；新代码通过 NavigationGraph 实例维护。"""
+    NavigationGraph(graph).add_transition(transition)
 
 
-def transition_id(from_page: str, operate: str, to_page: str, target: Dict[str, Any], effect: str = "") -> str:
-    payload = {
-        "from_page": from_page,
-        "operate": operate,
-        "to_page": to_page,
-        "target": {k: target.get(k) for k in ("type", "value", "key", "component_type", "key_description", "step_prompt") if target.get(k)},
-        "effect": effect,
-    }
-    digest = hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
-    return f"{from_page}__to__{to_page}__{operate}_{digest}"
-
-
-def attrs(node: Node) -> Dict[str, Any]:
-    return node.get("attributes", node)
-
-
-def children(node: Node) -> List[Node]:
-    return node.get("children", []) or []
-
-
-def to_bool(value: Any) -> bool:
-    if value is True:
-        return True
-    if value in (False, None):
-        return False
-    if isinstance(value, (int, float)):
-        return value != 0
-    return str(value).strip().lower() in {"true", "1", "yes"}
+def reorder_child_transitions(
+    graph: Dict[str, Any],
+    parent_page: str,
+    ordered_transition_ids: List[str],
+) -> List[str]:
+    """兼容旧调用；顺序规则由 NavigationGraph 统一实现。"""
+    return NavigationGraph(graph).reorder_children(parent_page, ordered_transition_ids)
 
 
 def get_type(node: Node) -> str:
-    a = attrs(node)
+    a = node.get("attributes", node)
     return str(a.get("type") or a.get("className") or a.get("componentType") or "")
 
 
 def get_key(node: Node) -> str:
-    a = attrs(node)
+    a = node.get("attributes", node)
     return str(a.get("key") or a.get("id") or "")
 
 
 def get_text(node: Node) -> str:
-    a = attrs(node)
+    a = node.get("attributes", node)
     return str(a.get("text") or a.get("originalText") or "").strip()
 
 
 def get_attr(node: Node, name: str, default: str = "") -> str:
-    return str(attrs(node).get(name, default) or "")
-
-
-def is_visible(node: Node) -> bool:
-    return get_attr(node, "visible", "true").lower() != "false"
-
-
-def is_enabled(node: Node) -> bool:
-    return get_attr(node, "enabled", "true").lower() != "false"
+    return str(node.get("attributes", node).get(name, default) or "")
 
 
 def walk(node: Node, depth: int = 0, parent: Optional[Node] = None):
     yield node, depth, parent
-    for child in children(node):
+    for child in node.get("children", []) or []:
         yield from walk(child, depth + 1, node)
-
-
-def find_all(root: Node, pred: Callable[[Node], bool]) -> List[Node]:
-    return [node for node, _, _ in walk(root) if pred(node)]
 
 
 def annotate(root: Node) -> None:
@@ -385,7 +572,7 @@ def annotate(root: Node) -> None:
         node["__type_path"] = type_path
         node["__index_path"] = index_path
         counts: Dict[str, int] = defaultdict(int)
-        for index, child in enumerate(children(node)):
+        for index, child in enumerate(node.get("children", []) or []):
             ctype = get_type(child) or "Node"
             counts[ctype] += 1
             rec(child, node, f"{type_path}/{ctype}[{counts[ctype]}]", f"{index_path}/{index}")
@@ -485,89 +672,44 @@ def is_stable_text_for_navigation(text: Any) -> bool:
     return True
 
 
-def nearest_label(node: Node) -> str:
-    texts = meaningful_texts(node)
-    if texts:
-        return texts[0]
-    for parent in parent_chain(node):
-        if get_type(parent) in {"Row", "Column", "ListItem", "Button", "MenuItem"}:
-            texts = meaningful_texts(parent)
-            if texts:
-                return texts[0]
-    return ""
-
-
-def is_title_key(key: str) -> bool:
-    """判断控件 key 是否属于页面标题。"""
-    normalized = str(key or "").strip().lower()
-    if not normalized:
-        return False
-    # 精确匹配，避免误把 subtitle、menuTitle 等识别成页面标题。
-    if normalized in TITLE_KEYS:
-        return True
-    suffix = normalized.rsplit(".", 1)[-1]
-    return suffix in TITLE_KEYS
-
-
-def find_page_title(root: Node) -> str:
-    for node, _, _ in walk(root):
-        key = get_key(node)
-        text = get_text(node)
-        if not text:
-            continue
-        if is_title_key(key):
-            return clean_label(text)
-        # 当前 Text 节点位于 TitleBar 内部。
-        for parent in parent_chain(node):
-            parent_name = get_key(parent) or get_type(parent)
-            if "titlebar" in parent_name.lower():
-                return clean_label(text)
-    return ""
-
-
-def find_nav_destination_key(root: Node) -> str:
-    candidates: List[Tuple[int, str]] = []
-    for node, depth, _ in walk(root):
-        if get_type(node) == "NavDestination" and is_visible(node):
-            key = get_key(node)
-            if key:
-                candidates.append((depth, key))
-    return sorted(candidates, reverse=True)[0][1] if candidates else ""
-
-
-def page_identity(root: Node) -> Dict[str, str]:
-    title = find_page_title(root)
-    nav_key = find_nav_destination_key(root)
-    page_id = nav_key or (f"title::{title}" if title else "unknown::page")
-    return {"page_id": page_id, "title": title or page_id, "nav_key": nav_key}
-
-
-def state_name_from_title(title: str, overlay: bool = False) -> str:
+def state_name_from_title(title: str) -> str:
     value = clean_label(title) or "page"
     if value == "设置":
         return "Pages_root"
     safe = re.sub(r"\s+", "_", value)
     safe = re.sub(r"[^\w\u4e00-\u9fff]+", "_", safe).strip("_") or "page"
-    return ("Overlay_" if overlay else "Pages_") + safe
-
-
-def detect_dialog_root(root: Node) -> Optional[Node]:
-    # Transient popup menus are part of a transition step, not standalone pages.
-    # Only explicit dialogs are promoted to overlay states.
-    candidates = find_all(root, lambda n: is_visible(n) and get_type(n) == "Dialog")
-    if not candidates:
-        return None
-    return max(candidates, key=lambda n: parse_rect(get_attr(n, "bounds"))["area"])
-
-
-def detect_overlay_title(root: Node) -> str:
-    dialog = detect_dialog_root(root)
-    return nearest_label(dialog) if dialog else ""
+    return "Pages_" + safe
 
 
 def build_navigation_state(root: Node) -> Dict[str, Any]:
-    title = find_page_title(root)
-    nav_key = find_nav_destination_key(root)
+    explicit_titles: List[Tuple[int, str]] = []
+    titlebar_texts: List[Tuple[int, str]] = []
+    nav_candidates: List[Tuple[int, str]] = []
+    for node, depth, _ in walk(root):
+        if get_type(node) == "NavDestination" and get_attr(node, "visible", "true").lower() != "false" and get_key(node):
+            nav_candidates.append((depth, get_key(node)))
+        text = clean_label(get_text(node))
+        if not text:
+            continue
+        key = get_key(node).strip().lower()
+        if key in TITLE_KEYS or key.rsplit(".", 1)[-1] in TITLE_KEYS:
+            explicit_titles.append((depth, text))
+            continue
+        if (
+            get_type(node).lower() in {"text", "label"}
+            and text not in {"返回", "返回按钮"}
+            and any(
+                "titlebar" in (get_key(parent) or get_type(parent)).lower()
+                for parent in parent_chain(node)
+            )
+        ):
+            titlebar_texts.append((depth, text))
+    title = (
+        explicit_titles[0][1]
+        if explicit_titles
+        else titlebar_texts[0][1] if titlebar_texts else ""
+    )
+    nav_key = sorted(nav_candidates, reverse=True)[0][1] if nav_candidates else ""
 
     page_name = state_name_from_title(title or "page")
     texts = [
@@ -589,21 +731,16 @@ def build_navigation_state(root: Node) -> Dict[str, Any]:
     }
 
 
-def node_semantic_summary(node: Node) -> Dict[str, Any]:
-    text = next((t for t in meaningful_texts(node) if is_stable_text_for_navigation(t)), "")
-    key = get_key(node)
-    return {
-        "component_type": get_type(node),
-        "text": text,
-        "key": key if is_stable_key_for_navigation(key) else "",
-        "bounds": get_attr(node, "bounds"),
-        "clickable": to_bool(attrs(node).get("clickable", False)),
-        "enabled": is_enabled(node),
-    }
-
-
 def is_recordable_clickable_area(node: Node, screen_area: int = 0) -> bool:
-    if not (to_bool(attrs(node).get("clickable", False)) and is_visible(node) and is_enabled(node)):
+    clickable = node.get("attributes", node).get("clickable", False)
+    if not (
+        (
+            (isinstance(clickable, (int, float)) and clickable != 0)
+            or str(clickable).strip().lower() in {"true", "1", "yes"}
+        )
+        and get_attr(node, "visible", "true").lower() != "false"
+        and get_attr(node, "enabled", "true").lower() != "false"
+    ):
         return False
     if get_type(node) in NON_INTERACTION_TYPES:
         return False
@@ -615,45 +752,48 @@ def is_recordable_clickable_area(node: Node, screen_area: int = 0) -> bool:
     return True
 
 
-def target_from_node(node: Node, dialog: bool = False) -> Dict[str, Any]:
-    text = next((t for t in meaningful_texts(node) if is_stable_text_for_navigation(t)), "")
-    key = get_key(node)
-    label = text or nearest_label(node) or key
-    if is_stable_key_for_navigation(key):
-        target = {"type": "key", "value": key, "key": key, "component_type": get_type(node), "text": text, "key_description": label, "step_prompt": label}
-    elif text:
-        target = {"type": "text", "value": text, "component_type": get_type(node), "text": text, "key_description": text, "step_prompt": text}
-    else:
-        target = {"needs_manual_label": True, "component_type": get_type(node)}
-    if dialog:
-        target["scope"] = "dialog"
-    return target
-
-
 def extract_navigation_candidates(root: Node) -> List[Dict[str, Any]]:
-    dialog_root = detect_dialog_root(root)
-    scope = dialog_root or root
     screen = screen_metrics_from_root(root).get("screen_size") or [0, 0]
     screen_area = int(screen[0] or 0) * int(screen[1] or 0) if isinstance(screen, list) and len(screen) == 2 else 0
-    nodes = [n for n, _, _ in walk(scope) if is_recordable_clickable_area(n, screen_area)]
+    nodes = [n for n, _, _ in walk(root) if is_recordable_clickable_area(n, screen_area)]
     nodes.sort(key=lambda n: (parse_rect(get_attr(n, "bounds"))["top"], parse_rect(get_attr(n, "bounds"))["left"]))
     candidates: List[Dict[str, Any]] = []
     seen = set()
     for node in nodes:
-        label = nearest_label(node) or get_text(node)
+        labels = meaningful_texts(node)
+        label = labels[0] if labels else ""
+        if not label:
+            for parent in parent_chain(node):
+                if get_type(parent) in {"Row", "Column", "ListItem", "Button", "MenuItem"}:
+                    parent_labels = meaningful_texts(parent)
+                    if parent_labels:
+                        label = parent_labels[0]
+                        break
+        label = label or get_text(node)
         if label in {"返回", "返回按钮"}:
             continue
         rect = parse_rect(get_attr(node, "bounds"))
-        target = target_from_node(node, dialog=bool(dialog_root))
-        sig = json.dumps([target.get("type"), target.get("value"), rect["center"]], ensure_ascii=False)
+        text = next((item for item in meaningful_texts(node) if is_stable_text_for_navigation(item)), "")
+        key = get_key(node)
+        component_type = get_type(node)
+        if is_stable_key_for_navigation(key):
+            description = text or label or key
+            target = {"key": key, "text": text, "key_description": description, "step_prompt": description}
+        elif text:
+            target = {"text": text, "key_description": text, "step_prompt": text}
+        elif component_type.lower() == "button":
+            target = {"type": "button", "key_description": "Button", "step_prompt": "Button"}
+        else:
+            target = {"needs_manual_label": True, "component_type": component_type}
+        sig = json.dumps([target.get("key"), target.get("text"), target.get("type"), rect["center"]], ensure_ascii=False)
         if sig in seen:
             continue
         seen.add(sig)
         candidates.append({
             "index": len(candidates) + 1,
-            "text": next((t for t in meaningful_texts(node) if is_stable_text_for_navigation(t)), ""),
-            "key": get_key(node) if is_stable_key_for_navigation(get_key(node)) else "",
-            "type": get_type(node),
+            "text": text,
+            "key": key if is_stable_key_for_navigation(key) else "",
+            "type": component_type,
             "bounds": get_attr(node, "bounds"),
             "bounds_center": rect["center"],
             "suggested_target": target,
@@ -667,178 +807,106 @@ def hit_test_full_ui_tree(
     x: int,
     y: int,
 ) -> Optional[Dict[str, Any]]:
-    """
-    点击命中规则：
-
-    1. 如果点击点位于 ListItem/GridItem 中：
-       - 选择最深层 Item；
-       - 在该 Item 内找第一个 clickable；
-       - 不进入其他嵌套 ListItem/GridItem。
-
-    2. clickable 自身有稳定 key/text 时直接使用；
-       否则分别从 clickable 内部补充缺失的 key/text。
-
-    3. 如果点击点不属于任何 Item，则使用原来的坐标命中逻辑。
-    """
+    """优先命中最深 Item 内的首个 clickable，否则选择覆盖点的最小 clickable。"""
     item_types = {"ListItem", "GridItem"}
-
     screen = screen_metrics_from_root(root).get("screen_size") or [0, 0]
-    screen_area = (
-        int(screen[0] or 0) * int(screen[1] or 0)
-        if len(screen) == 2
-        else 0
-    )
-
+    screen_area = int(screen[0] or 0) * int(screen[1] or 0) if len(screen) == 2 else 0
     item_hits = []
     for node, depth, _ in walk(root):
-        if get_type(node) not in item_types:
-            continue
-
         rect = parse_rect(get_attr(node, "bounds"))
-        if not rect["valid"]:
-            continue
-
         if (
-            rect["left"] <= x <= rect["right"]
+            get_type(node) in item_types
+            and rect["valid"]
+            and rect["left"] <= x <= rect["right"]
             and rect["top"] <= y <= rect["bottom"]
         ):
             item_hits.append((depth, rect["area"], node))
-
-    item_node = None
-    if item_hits:
-        item_hits.sort(key=lambda item: (-item[0], item[1]))
-        item_node = item_hits[0][2]
-
+    item_node = min(item_hits, key=lambda item: (-item[0], item[1]))[2] if item_hits else None
     clickable_node = None
     if item_node:
         stack = [item_node]
-
         while stack:
             node = stack.pop()
-
             if node is not item_node and get_type(node) in item_types:
                 continue
-
             if is_recordable_clickable_area(node, screen_area):
                 clickable_node = node
                 break
-
-            stack.extend(reversed(children(node)))
-
-    if clickable_node is None and item_node is None:
+            stack.extend(reversed(node.get("children", []) or []))
+    else:
         hits = []
-
         for node, depth, _ in walk(root):
             rect = parse_rect(get_attr(node, "bounds"))
-            if not rect["valid"]:
-                continue
-
-            if not (
-                rect["left"] <= x <= rect["right"]
+            if (
+                rect["valid"]
+                and rect["left"] <= x <= rect["right"]
                 and rect["top"] <= y <= rect["bottom"]
+                and is_recordable_clickable_area(node, screen_area)
             ):
-                continue
-
-            if is_recordable_clickable_area(node, screen_area):
                 hits.append((rect["area"], -depth, node))
-
         if hits:
-            hits.sort(key=lambda item: (item[0], item[1]))
-            clickable_node = hits[0][2]
-
+            clickable_node = min(hits, key=lambda item: (item[0], item[1]))[2]
     if clickable_node is None:
         return None
-
     key = get_key(clickable_node)
     text = clean_label(get_text(clickable_node))
-
     if not is_stable_key_for_navigation(key):
         key = ""
-
     if not is_stable_text_for_navigation(text):
         text = ""
-
     if not key or not text:
-        stack = list(reversed(children(clickable_node)))
-
+        stack = list(reversed(clickable_node.get("children", []) or []))
         while stack:
             node = stack.pop()
-
             if get_type(node) in item_types:
                 continue
-
             if not key:
                 child_key = get_key(node)
                 if is_stable_key_for_navigation(child_key):
                     key = child_key
-
             if not text:
                 child_text = clean_label(get_text(node))
                 if is_stable_text_for_navigation(child_text):
                     text = child_text
-
             if key and text:
                 break
-
-            stack.extend(reversed(children(node)))
-
+            stack.extend(reversed(node.get("children", []) or []))
     return {
         "component_type": get_type(clickable_node),
         "key": key,
         "text": text,
         "bounds": get_attr(clickable_node, "bounds"),
         "clickable": True,
-        "enabled": is_enabled(clickable_node),
+        "enabled": get_attr(clickable_node, "enabled", "true").lower() != "false",
         "item_type": get_type(item_node) if item_node else "",
         "item_bounds": get_attr(item_node, "bounds") if item_node else "",
     }
 
 
 def build_semantic_target_from_node(hit_node: Optional[Dict[str, Any]], manual_label: str = "") -> Dict[str, Any]:
-    if manual_label:
-        return {"type": "manual", "value": manual_label, "key_description": manual_label, "step_prompt": manual_label}
     if not hit_node:
         return {"needs_manual_label": True}
     ctype = str(hit_node.get("component_type") or "")
     text = clean_label(hit_node.get("text") or "")
     key = str(hit_node.get("key") or "")
+    if manual_label:
+        target = {
+            "key": key,
+            "text": text,
+            "key_description": manual_label,
+            "step_prompt": manual_label,
+        }
+        if not key and not text and ctype.lower() == "button":
+            target["type"] = "button"
+        return {field: value for field, value in target.items() if value not in (None, "", [])}
     if key:
         desc = text or key
-        return {"type": "key", "value": key, "key": key, "component_type": ctype, "text": text, "key_description": desc, "step_prompt": desc}
+        return {field: value for field, value in {"key": key, "text": text, "key_description": desc, "step_prompt": desc}.items() if value}
     if text:
-        return {"type": "text", "value": text, "component_type": ctype, "text": text, "key_description": text, "step_prompt": text}
+        return {"text": text, "key_description": text, "step_prompt": text}
+    if ctype.lower() == "button":
+        return {"type": "button", "key_description": "Button", "step_prompt": "Button"}
     return {"needs_manual_label": True, "component_type": ctype}
-
-
-def horizontal_target(direction: str) -> Dict[str, Any]:
-    return {
-        "type": "gesture",
-        "value": f"swipe_{direction}",
-        "key_description": f"横向{'左' if direction == 'left' else '右'}滑",
-        "step_prompt": f"横向{'左' if direction == 'left' else '右'}滑",
-        "axis": "horizontal",
-    }
-
-
-def next_horizontal_view_state(graph: Dict[str, Any], base_page: str) -> Dict[str, Any]:
-    max_index = 0
-    pattern = re.compile(rf"^{re.escape(base_page)}__view_h(\d+)$")
-    for name in graph.get("states", {}):
-        match = pattern.match(str(name))
-        if match:
-            max_index = max(max_index, int(match.group(1)))
-    page_name = f"{base_page}__view_h{max_index + 1}"
-    return {
-        "page_name": page_name,
-        "page_description": f"{base_page} 横向视图 {max_index + 1}",
-        "base_page": base_page,
-        "state_type": "local_view",
-        "effect": "local_horizontal_view_changed",
-    }
-
-
-def auto_complete_pending_if_needed(*_args: Any, **_kwargs: Any) -> None:
-    """兼容旧调用；待确认跳转现在由 Web 服务完成。"""
 
 
 # Contextual page identity
@@ -847,18 +915,11 @@ def state_raw_page_name(state: Dict[str, Any], page_name: str = "") -> str:
     if raw_name:
         return raw_name
     title = str(state.get("last_title") or "").strip()
-    return state_name_from_title(title, overlay=bool(state.get("is_overlay"))) if title else str(state.get("page_name") or page_name or "").strip()
-
-
-def state_display_title(state: Dict[str, Any], page_name: str = "") -> str:
-    title = str(state.get("last_title") or state.get("page_description") or "").strip().removeprefix("弹窗：")
-    if title:
-        return title
-    return "设置" if page_name == "Pages_root" else page_name.removeprefix("Pages_").removeprefix("Overlay_") or "page"
+    return state_name_from_title(title) if title else str(state.get("page_name") or page_name or "").strip()
 
 
 def current_session_page(work_dir: Path) -> str:
-    path = current_path_session_path(work_dir)
+    path = work_dir / "outputs" / "navigation" / "current_path_session.json"
     if not path.exists():
         return ""
     try:
@@ -869,24 +930,11 @@ def current_session_page(work_dir: Path) -> str:
 
 def copy_stored_page_context(detected: Dict[str, Any], stored: Dict[str, Any], page_name: str) -> Dict[str, Any]:
     state = {**detected, "page_name": page_name, "raw_page_name": state_raw_page_name(detected)}
-    for key in ("parent_page", "parent_title"):
+    for key in ("parent_page", "parent_title", "context_key", "entry_identity"):
         if key in stored:
             state[key] = stored[key]
-    recorded_as_page = (
-        page_name.startswith("Pages_")
-        and page_name != "Pages_root"
-        and bool(stored.get("parent_page"))
-    )
-    if recorded_as_page:
-        for key in ("state_type", "is_overlay", "overlay_parent", "overlay_title"):
-            state.pop(key, None)
-        state["page_description"] = str(
-            stored.get("page_description")
-            or state.get("page_description")
-            or ""
-        ).removeprefix("弹窗：")
-    elif detected.get("is_overlay") and "overlay_parent" in stored:
-        state["overlay_parent"] = stored["overlay_parent"]
+    if stored.get("page_description"):
+        state["page_description"] = stored["page_description"]
     return state
 
 
@@ -915,10 +963,15 @@ def resolve_detected_state(graph: Dict[str, Any], detected: Dict[str, Any], pref
         if isinstance(stored, dict)
         and state_raw_page_name(stored, str(name)) == raw_name
     ]
-    scored = sorted(
-        (state_signature_score(state, stored), name, stored)
-        for name, stored in matches
-    )
+    scored = []
+    left_nav = str(state.get("nav_key") or "")
+    for name, stored in matches:
+        right_nav = str(stored.get("nav_key") or "")
+        score = (
+            10000 if left_nav == right_nav else -1
+        ) if left_nav and right_nav else state_structure_score(state, stored)
+        scored.append((score, name, stored))
+    scored.sort()
     if scored and scored[-1][0] >= 3:
         best_score = scored[-1][0]
         best = [item for item in scored if item[0] == best_score]
@@ -943,20 +996,7 @@ def resolve_detected_state(graph: Dict[str, Any], detected: Dict[str, Any], pref
                 else -1
             )
             if preferred_score >= root_score and preferred_score >= 1:
-                normalized_page = preferred_page
-                if (
-                    preferred_page.startswith("Overlay_")
-                    and preferred.get("parent_page")
-                ):
-                    normalized_page = "Pages_" + preferred_page.removeprefix("Overlay_")
-                    if normalized_page not in states:
-                        rename_graph_page(graph, preferred_page, normalized_page)
-                    preferred = states.get(normalized_page, preferred)
-                return copy_stored_page_context(
-                    state,
-                    preferred,
-                    normalized_page,
-                )
+                return copy_stored_page_context(state, preferred, preferred_page)
         state["page_name"] = raw_name
         return state
     return copy_stored_page_context(state, matches[0][1], matches[0][0]) if len(matches) == 1 else state
@@ -976,16 +1016,6 @@ def state_structure_score(left: Dict[str, Any], right: Dict[str, Any]) -> int:
     shared_texts = len(state_signature_texts(left) & state_signature_texts(right))
     same_title = clean_label(left.get("last_title")) == clean_label(right.get("last_title"))
     return shared_texts * 2 + int(bool(same_title))
-
-
-def state_signature_score(left: Dict[str, Any], right: Dict[str, Any]) -> int:
-    if state_raw_page_name(left) != state_raw_page_name(right):
-        return -1
-    left_nav = str(left.get("nav_key") or "")
-    right_nav = str(right.get("nav_key") or "")
-    if left_nav and right_nav:
-        return 10000 if left_nav == right_nav else -1
-    return state_structure_score(left, right)
 
 
 def states_represent_same_page(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
@@ -1009,23 +1039,6 @@ def states_represent_same_page(left: Dict[str, Any], right: Dict[str, Any]) -> b
     return shared >= max(1, (min(len(left_texts), len(right_texts)) + 1) // 2)
 
 
-def state_matches_graph_page(graph: Dict[str, Any], detected: Dict[str, Any], page_name: str) -> bool:
-    return states_represent_same_page(detected, graph.get("states", {}).get(page_name, {"page_name": page_name}))
-
-
-def rename_graph_page(graph: Dict[str, Any], old_name: str, new_name: str) -> None:
-    states = graph.setdefault("states", {})
-    if not old_name or old_name == new_name or old_name not in states or new_name in states:
-        return
-    state = states.pop(old_name)
-    state["page_name"] = new_name
-    states[new_name] = state
-    for transition in graph.get("transitions", []):
-        for field in ("from_page", "to_page"):
-            if transition.get(field) == old_name:
-                transition[field] = new_name
-
-
 def contextualize_child_state(
     graph: Dict[str, Any],
     from_page: str,
@@ -1034,8 +1047,11 @@ def contextualize_child_state(
 ) -> Dict[str, Any]:
     state = dict(detected)
     raw_name = state_raw_page_name(state)
-    parent_title = state_display_title(graph.get("states", {}).get(from_page, {"page_name": from_page}), from_page)
-    child_title = state_display_title(state, raw_name)
+    parent = graph.get("states", {}).get(from_page, {"page_name": from_page})
+    parent_title = str(parent.get("last_title") or parent.get("page_description") or "").strip()
+    parent_title = parent_title or ("设置" if from_page == "Pages_root" else from_page.removeprefix("Pages_") or "page")
+    child_title = str(state.get("last_title") or state.get("page_description") or "").strip()
+    child_title = child_title or ("设置" if raw_name == "Pages_root" else raw_name.removeprefix("Pages_") or "page")
     target_title = clean_label(
         (via_target or {}).get("step_prompt")
         or (via_target or {}).get("key_description")
@@ -1043,38 +1059,41 @@ def contextualize_child_state(
         or (via_target or {}).get("value")
         or (via_target or {}).get("key")
     )
+    entry_identity = candidate_merge_key(via_target or {})
+    context_key = f"{from_page}::{raw_name}::{entry_identity}"
     route_title = target_title if child_title == parent_title and target_title else child_title
     contextual_title = f"{parent_title} to{route_title}"
-    recorded_as_page = str((via_target or {}).get("expect") or "") == "new_page"
-    if recorded_as_page:
-        for key in ("state_type", "is_overlay", "overlay_parent", "overlay_title"):
-            state.pop(key, None)
-        state["page_description"] = str(
-            state.get("page_description") or ""
-        ).removeprefix("弹窗：")
-    contextual_name = state_name_from_title(
-        contextual_title,
-        overlay=bool(state.get("is_overlay")) and not recorded_as_page,
-    )
-    if contextual_name.startswith("Pages_"):
-        legacy_overlay_name = "Overlay_" + contextual_name.removeprefix("Pages_")
-        if (
-            legacy_overlay_name in graph.get("states", {})
-            and contextual_name not in graph.get("states", {})
-        ):
-            rename_graph_page(graph, legacy_overlay_name, contextual_name)
+    contextual_name = state_name_from_title(contextual_title)
+    known_name = next((
+        str(name) for name, stored in graph.get("states", {}).items()
+        if isinstance(stored, dict) and stored.get("context_key") == context_key
+    ), "")
+    if known_name:
+        contextual_name = known_name
     matching = []
     for transition in graph.get("transitions", []):
         child_name = str(transition.get("to_page") or "")
         child = graph.get("states", {}).get(child_name, {})
         if transition.get("from_page") == from_page and isinstance(child, dict) and state_raw_page_name(child, child_name) == raw_name:
             matching.append(child_name)
-    if len(matching) == 1 and matching[0] != contextual_name:
-        rename_graph_page(graph, matching[0], contextual_name)
+    if not known_name and len(matching) == 1 and matching[0] != contextual_name:
+        old_name = matching[0]
+        states = graph.setdefault("states", {})
+        if old_name in states and contextual_name not in states:
+            NavigationGraph(graph).rename_page(old_name, contextual_name)
     existing = graph.get("states", {}).get(contextual_name, {})
     if isinstance(existing, dict) and existing:
         state = copy_stored_page_context(state, existing, contextual_name)
-    return {**state, "page_name": contextual_name, "raw_page_name": raw_name, "parent_page": from_page, "parent_title": parent_title, "page_description": contextual_title}
+    return {
+        **state,
+        "page_name": contextual_name,
+        "raw_page_name": raw_name,
+        "parent_page": from_page,
+        "parent_title": parent_title,
+        "entry_identity": entry_identity,
+        "context_key": context_key,
+        "page_description": contextual_title,
+    }
 
 # Navigation graph records and directory
 def candidate_merge_key(candidate: Dict[str, Any]) -> str:
@@ -1089,12 +1108,10 @@ def candidate_merge_key(candidate: Dict[str, Any]) -> str:
     component_type = str(candidate.get("component_type") or "").strip()
     if component_type and text:
         return f"component_text::{component_type}::{text}"
+    if text:
+        return f"text::{text}"
     stable = json.dumps({k: candidate.get(k) for k in ("type", "value", "component_type", "key_description", "step_prompt") if candidate.get(k)}, ensure_ascii=False, sort_keys=True)
     return "hash::" + hashlib.sha1(stable.encode("utf-8")).hexdigest()[:12] if stable != "{}" else ""
-
-
-def candidate_id(candidate: Dict[str, Any]) -> str:
-    return str(candidate.get("candidate_id") or candidate_merge_key(candidate))
 
 
 def candidate_from_auto(c: Dict[str, Any], source: str = "auto_detected") -> Dict[str, Any]:
@@ -1106,7 +1123,7 @@ def candidate_from_auto(c: Dict[str, Any], source: str = "auto_detected") -> Dic
         "value": target.get("value") or c.get("key") or text,
         "component_type": str(target.get("component_type") or c.get("type") or ""),
         "text": text,
-        "key": str(c.get("key") or (target.get("value") if target.get("type") == "key" else "") or ""),
+        "key": str(c.get("key") or target.get("key") or (target.get("value") if target.get("type") == "key" else "") or ""),
         "key_description": str(target.get("key_description") or text or target.get("value") or ""),
         "step_prompt": str(target.get("step_prompt") or text or target.get("value") or ""),
         "source": source,
@@ -1117,74 +1134,25 @@ def candidate_from_auto(c: Dict[str, Any], source: str = "auto_detected") -> Dic
     return item
 
 
-def candidate_from_target(target: Dict[str, Any], source: str = "hit_test_click") -> Dict[str, Any]:
-    clean = {k: v for k, v in target.items() if k not in {"point", "normalized_point", "coordinate_hit", "bounds_center", "fallback_locator"}}
-    item = {
-        "candidate_id": "",
-        "type": str(clean.get("type") or ""),
-        "value": clean.get("value", ""),
-        "component_type": str(clean.get("component_type") or ""),
-        "text": str(clean.get("text") or (clean.get("value") if clean.get("type") in {"text", "button_text"} else "") or ""),
-        "key": str(clean.get("value") if clean.get("type") in {"key", "button"} else clean.get("key", "") or ""),
-        "key_description": str(clean.get("key_description") or clean.get("text") or clean.get("value") or ""),
-        "step_prompt": str(clean.get("step_prompt") or clean.get("key_description") or clean.get("value") or ""),
-        "source": source,
-        "transition_ids": [],
-        "operation_ids": [],
-    }
-    item["candidate_id"] = candidate_merge_key(item)
-    return item
-
-
-def step_target(target: Dict[str, Any]) -> Dict[str, Any]:
+def step_target(target: Dict[str, Any], include_type: bool = False) -> Dict[str, Any]:
+    legacy_type = str(target.get("type") or "")
     allowed = {
-        "type",
-        "value",
-        "component_type",
         "text",
         "key",
         "key_description",
         "step_prompt",
-        "scope",
         "expect",
     }
+    if include_type:
+        allowed.add("type")
     clean = {k: v for k, v in target.items() if k in allowed and v not in (None, "", [])}
-    if target.get("value") and "key" not in clean and target.get("type") in {"key", "button"}:
+    if target.get("value") and "key" not in clean and legacy_type in {"key", "button"}:
         clean["key"] = target.get("value")
+    if not include_type and not (clean.get("key") or clean.get("text")) and legacy_type == "button":
+        clean["type"] = "button"
+    elif not include_type:
+        clean.pop("type", None)
     return clean
-
-
-def transition_step(target: Dict[str, Any], operate: str = "tap") -> Dict[str, Any]:
-    return {"operate": operate, "target": step_target(target)}
-
-
-def transition_steps(transition: Dict[str, Any]) -> List[Dict[str, Any]]:
-    steps = transition.get("steps")
-    if isinstance(steps, list) and steps:
-        return [s for s in steps if isinstance(s, dict)]
-    target = transition.get("target") or {}
-    operate = str(transition.get("operate") or "tap")
-    return [transition_step(target, operate)] if target else []
-
-
-def transition_steps_label(steps: List[Dict[str, Any]]) -> str:
-    labels = []
-    for step in steps:
-        target = step.get("target") or {}
-        label = target.get("step_prompt") or target.get("key_description") or target.get("text") or target.get("value") or target.get("key") or step.get("operate")
-        labels.append(str(label))
-    return " -> ".join(labels)
-
-
-def transition_id_for_steps(from_page: str, to_page: str, steps: List[Dict[str, Any]], effect: str = "") -> str:
-    payload = {
-        "from_page": from_page,
-        "to_page": to_page,
-        "steps": steps,
-        "effect": effect,
-    }
-    digest = hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
-    return f"{from_page}__to__{to_page}__steps_{digest}"
 
 
 def component_summary_from_tree(root_json: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1192,116 +1160,33 @@ def component_summary_from_tree(root_json: Dict[str, Any]) -> List[Dict[str, Any
     components: List[Dict[str, Any]] = []
     seen = set()
     for node, _, _ in walk(root_json):
-        item = node_semantic_summary(node)
-        ctype = str(item.get("component_type") or "")
+        ctype = get_type(node)
         if ctype in {"Root", "Page", "Navigation", "NavDestination", "RelativeContainer"}:
             continue
-        if not ctype or not item.get("enabled", True):
+        if not ctype or get_attr(node, "enabled", "true").lower() == "false":
             continue
-        if not item.get("key") and not item.get("text"):
+        text = next((item for item in meaningful_texts(node) if is_stable_text_for_navigation(item)), "")
+        key = get_key(node)
+        key = key if is_stable_key_for_navigation(key) else ""
+        if not key and not text:
             continue
+        item = {"text": text, "key": key, "component_type": ctype}
         merge_key = candidate_merge_key(item)
         if not merge_key or merge_key in seen:
             continue
         seen.add(merge_key)
+        clickable = node.get("attributes", node).get("clickable", False)
         components.append({
             "text": item.get("text", ""),
             "key": item.get("key", ""),
             "component_type": ctype,
-            "clickable": bool(item.get("clickable", False)),
-            "enabled": bool(item.get("enabled", True)),
+            "clickable": (
+                (isinstance(clickable, (int, float)) and clickable != 0)
+                or str(clickable).strip().lower() in {"true", "1", "yes"}
+            ),
+            "enabled": True,
         })
     return components
-
-
-def components_signature(components: List[Dict[str, Any]]) -> str:
-    keys = sorted(candidate_merge_key(c) for c in components if candidate_merge_key(c))
-    return hashlib.sha256(json.dumps(keys, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
-
-
-def page_operation_id(page_name: str, target: Dict[str, Any]) -> str:
-    desc = str(target.get("key_description") or target.get("step_prompt") or target.get("value") or "操作")
-    safe = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in desc).strip("_") or "operation"
-    digest = hashlib.sha1(json.dumps([page_name, target.get("type"), target.get("value"), desc], ensure_ascii=False).encode("utf-8")).hexdigest()[:8]
-    return f"{page_name}__op__{safe}_{digest}"
-
-
-def next_page_operation_id(state_entry: Dict[str, Any]) -> str:
-    """生成当前页面内部顺序编号：operation1、operation2……"""
-    operations = state_entry.get("page_operations", []) or []
-
-    max_index = 0
-
-    for operation in operations:
-        operation_id = str(operation.get("operation_id") or "")
-
-        if not operation_id.startswith("operation"):
-            continue
-
-        number = operation_id[len("operation"):]
-
-        if number.isdigit():
-            max_index = max(max_index, int(number))
-
-    return f"operation{max_index + 1}"
-
-
-def page_variant_id(page_name: str, operation: Dict[str, Any], after_signature: str) -> str:
-    payload = [page_name, operation.get("operation_id"), operation.get("effect"), after_signature]
-    digest = hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:10]
-    return f"{page_name}__variant__{digest}"
-
-
-def upsert_page_variant(state_entry: Dict[str, Any], operation: Dict[str, Any], revealed: List[Dict[str, Any]], hidden: List[Dict[str, Any]]) -> None:
-    variant = {
-        "variant_id": page_variant_id(str(state_entry.get("page_name") or ""), operation, str(operation.get("after_signature") or "")),
-        "created_at": now_iso(),
-        "trigger_operation_id": operation.get("operation_id"),
-        "trigger": operation.get("target") or {},
-        "operate": operation.get("operate") or "tap",
-        "effect": operation.get("effect") or "same_page_state_changed",
-        "before_signature": operation.get("before_signature"),
-        "after_signature": operation.get("after_signature"),
-        "revealed_candidates": revealed,
-        "hidden_candidates": hidden,
-        "is_mutually_exclusive": bool(revealed and hidden),
-    }
-    variants = state_entry.setdefault("page_variants", [])
-    variants[:] = [item for item in variants if item.get("variant_id") != variant["variant_id"]]
-    variants.append(variant)
-
-
-def transition_lookup(graph: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    return {str(t.get("transition_id")): t for t in graph.get("transitions", []) if t.get("transition_id")}
-
-
-def all_operation_ids(state: Dict[str, Any]) -> Set[str]:
-    return {str(op.get("operation_id")) for op in state.get("page_operations", []) if op.get("operation_id")}
-
-
-def candidate_record_status(graph: Dict[str, Any], page_name: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
-    tids = [tid for tid in candidate.get("transition_ids", []) if tid]
-    oids = [oid for oid in candidate.get("operation_ids", []) if oid]
-    ctype = str(candidate.get("component_type") or "")
-    if ctype in {"Toggle", "Switch", "CheckBox", "Checkbox"}:
-        return {"status": "same_page_control", "label": "同页控件，不建议录制为页面跳转", "transition_ids": tids, "operation_ids": oids}
-    lookup = transition_lookup(graph)
-    valid_tids = [tid for tid in tids if tid in lookup]
-    if valid_tids:
-        to_page = lookup[valid_tids[0]].get("to_page", "")
-        return {"status": "recorded_transition", "label": f"已录制跳转 -> {to_page}", "transition_ids": valid_tids, "operation_ids": oids}
-    if oids:
-        return {"status": "page_operation", "label": "页面内操作", "transition_ids": [], "operation_ids": oids}
-    if ctype == "Button":
-        return {"status": "unrecorded", "label": "Button / 未录制", "transition_ids": [], "operation_ids": []}
-    return {"status": "unrecorded", "label": "未录制", "transition_ids": [], "operation_ids": []}
-
-
-def enrich_candidate(graph: Dict[str, Any], page_name: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
-    item = dict(candidate)
-    item.setdefault("candidate_id", candidate_id(item))
-    item.update(candidate_record_status(graph, page_name, item))
-    return item
 
 
 def get_page_merged_candidates(graph: Dict[str, Any], page_name: str, current_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1323,7 +1208,32 @@ def get_page_merged_candidates(graph: Dict[str, Any], page_name: str, current_ca
         item.setdefault("transition_ids", [])
         item.setdefault("operation_ids", [])
         merged[key] = item
-    return [enrich_candidate(graph, page_name, c) for c in merged.values()]
+    transitions = {
+        str(item.get("transition_id")): item
+        for item in graph.get("transitions", [])
+        if item.get("transition_id")
+    }
+    result = []
+    for candidate in merged.values():
+        item = dict(candidate)
+        item.setdefault("candidate_id", str(item.get("candidate_id") or candidate_merge_key(item)))
+        raw_tids = [tid for tid in item.get("transition_ids", []) if tid]
+        tids = [tid for tid in raw_tids if tid in transitions]
+        oids = [oid for oid in item.get("operation_ids", []) if oid]
+        ctype = str(item.get("component_type") or "")
+        if ctype in {"Toggle", "Switch", "CheckBox", "Checkbox"}:
+            status, label = "same_page_control", "同页控件，不建议录制为页面跳转"
+            tids = raw_tids
+        elif tids:
+            status, label = "recorded_transition", f"已录制跳转 -> {transitions[tids[0]].get('to_page', '')}"
+        elif oids:
+            status, label = "page_operation", "页面内操作"
+        else:
+            status = "unrecorded"
+            label = "Button / 未录制" if ctype == "Button" else "未录制"
+        item.update({"status": status, "label": label, "transition_ids": tids, "operation_ids": oids})
+        result.append(item)
+    return result
 
 
 def upsert_candidate(state_entry: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
@@ -1346,7 +1256,20 @@ def upsert_candidate(state_entry: Dict[str, Any], candidate: Dict[str, Any]) -> 
 
 def upsert_clicked_target_as_candidate(graph: Dict[str, Any], page_name: str, target: Dict[str, Any], transition_id: Optional[str] = None, operation_id: Optional[str] = None) -> Dict[str, Any]:
     state_entry = graph.setdefault("states", {}).setdefault(page_name, {"page_name": page_name})
-    item = candidate_from_target(target, source="hit_test_click")
+    clean = {key: value for key, value in target.items() if key not in {"point", "normalized_point", "coordinate_hit", "bounds_center", "fallback_locator"}}
+    item = {
+        "type": str(clean.get("type") or ""),
+        "value": clean.get("value", ""),
+        "component_type": str(clean.get("component_type") or ""),
+        "text": str(clean.get("text") or (clean.get("value") if clean.get("type") in {"text", "button_text"} else "") or ""),
+        "key": str(clean.get("key") or (clean.get("value") if clean.get("type") in {"key", "button"} else "") or ""),
+        "key_description": str(clean.get("key_description") or clean.get("text") or clean.get("value") or ""),
+        "step_prompt": str(clean.get("step_prompt") or clean.get("key_description") or clean.get("value") or ""),
+        "source": "hit_test_click",
+        "transition_ids": [],
+        "operation_ids": [],
+    }
+    item["candidate_id"] = candidate_merge_key(item)
     item["clicked_count"] = 1
     item["last_clicked_at"] = now_iso()
     if transition_id:
@@ -1375,159 +1298,85 @@ def upsert_clicked_target_as_candidate(graph: Dict[str, Any], page_name: str, ta
     return upsert_candidate(state_entry, item)
 
 
-def transition_label(t: Dict[str, Any]) -> str:
-    steps = transition_steps(t)
-    if len(steps) > 1:
-        return transition_steps_label(steps)
-    target = t.get("target") or {}
-    return str(target.get("step_prompt") or target.get("key_description") or target.get("value") or t.get("operate") or "")
-
-
-def state_title(state: Dict[str, Any], page_name: str) -> str:
-    return str(state.get("last_title") or state.get("page_description") or page_name).replace("弹窗：", "")
-
-
 def build_page_directory(graph: Dict[str, Any]) -> Dict[str, Any]:
-    states = graph.get("states", {})
-    transitions = [t for t in graph.get("transitions", []) if t.get("from_page") != t.get("to_page")]
-    incoming: Dict[str, List[Dict[str, Any]]] = {}
-    outgoing: Dict[str, List[Dict[str, Any]]] = {}
-    for t in transitions:
-        incoming.setdefault(str(t.get("to_page")), []).append(t)
-        outgoing.setdefault(str(t.get("from_page")), []).append(t)
+    navigation = NavigationGraph(graph)
+    states = navigation.states
+    outgoing = navigation.ordered_outgoing()
+
     def node(page: str, seen: Set[str]) -> Dict[str, Any]:
         st = states.get(page, {})
         children = []
         for t in outgoing.get(page, []):
             child = str(t.get("to_page"))
-            if child in seen or states.get(child, {}).get("is_overlay"):
+            if child in seen:
                 continue
-            steps = transition_steps(t)
-            children.append({**node(child, seen | {child}), "via": {
+            steps = t.get("steps")
+            if not isinstance(steps, list) or not steps:
+                target = t.get("target") or {}
+                steps = [{"operate": str(t.get("operate") or "tap"), "target": step_target(target)}] if target else []
+            else:
+                steps = [step for step in steps if isinstance(step, dict)]
+            target = t.get("target") or {}
+            step_labels = [
+                str(
+                    (step.get("target") or {}).get("step_prompt")
+                    or (step.get("target") or {}).get("key_description")
+                    or (step.get("target") or {}).get("text")
+                    or (step.get("target") or {}).get("value")
+                    or (step.get("target") or {}).get("key")
+                    or step.get("operate")
+                    or "tap"
+                )
+                for step in steps
+            ]
+            label = " -> ".join(step_labels) if len(step_labels) > 1 else str(
+                target.get("step_prompt")
+                or target.get("key_description")
+                or target.get("text")
+                or target.get("value")
+                or target.get("key")
+                or t.get("operate")
+                or ""
+            )
+            via = {
                 "from_page": page,
-                "target_label": transition_label(t),
+                "target_label": label,
                 "transition_id": t.get("transition_id"),
+                "priority": safe_priority(t.get("priority")),
                 "step_count": len(steps),
                 "steps": steps,
-            }})
-        return {"page_name": page, "title": state_title(st, page), "children": children}
+            }
+            children.append({**node(child, seen | {child}), "via": via})
+        title = str(st.get("last_title") or st.get("page_description") or page)
+        return {"page_name": page, "title": title, "children": children}
     flat = []
     for page, st in states.items():
+        title = str(st.get("last_title") or st.get("page_description") or page)
         flat.append({
             "page_name": page,
-            "title": state_title(st, page),
-            "incoming_count": len(incoming.get(page, [])),
+            "title": title,
+            "incoming_count": sum(
+                1
+                for siblings in outgoing.values()
+                for transition in siblings
+                if transition.get("to_page") == page
+            ),
             "outgoing_count": len(outgoing.get(page, [])),
             "candidate_count": len(st.get("merged_candidates", []) or []),
             "operation_count": len(st.get("page_operations", []) or []),
             "continued_capture_count": len(st.get("continued_captures", []) or []),
-            "is_overlay": bool(st.get("is_overlay")),
-            "state_type": st.get("state_type") or ("overlay" if st.get("is_overlay") else "page"),
         })
     return {"root": "Pages_root", "items": [node("Pages_root", {"Pages_root"})] if "Pages_root" in states else [], "flat_pages": sorted(flat, key=lambda x: x["page_name"])}
 
-def bfs_path(graph: Dict[str, Any], target_page: str) -> Optional[List[Dict[str, Any]]]:
-    queue: List[Tuple[str, List[Dict[str, Any]]]] = [("Pages_root", [])]
-    seen = {"Pages_root"}
-    while queue:
-        page, path = queue.pop(0)
-        if page == target_page:
-            return path
-        for t in graph.get("transitions", []):
-            if t.get("from_page") != page or t.get("from_page") == t.get("to_page"):
-                continue
-            nxt = str(t.get("to_page"))
-            if nxt in seen:
-                continue
-            seen.add(nxt)
-            queue.append((nxt, path + [t]))
-    return None
-
-
-def find_candidate_center_for_target(root_json: Dict[str, Any], target: Dict[str, Any]) -> Optional[List[int]]:
-    candidates = extract_navigation_candidates(root_json)
-    want_type = str(target.get("type") or "")
-    want_value = str(target.get("value") or target.get("key") or "")
-    want_text = str(target.get("text") or target.get("key_description") or target.get("step_prompt") or "")
-    for c in candidates:
-        ct = c.get("suggested_target") or {}
-        values = {str(c.get("key") or ""), str(c.get("text") or ""), str(ct.get("value") or ""), str(ct.get("key_description") or ""), str(ct.get("step_prompt") or "")}
-        if (want_value and want_value in values) or (want_text and want_text in values) or (want_type == ct.get("type") and want_value == str(ct.get("value") or "")):
-            center = c.get("bounds_center")
-            return center if isinstance(center, list) and len(center) == 2 else None
-    return None
-
-
-def validate_page_name_for_rename(page_name: str) -> str:
-    page_name = page_name.strip()
-    if not page_name:
-        raise ValueError("page_name 不能为空")
-    if not page_name.startswith("Pages_"):
-        raise ValueError("page_name 必须以 Pages_ 开头，例如 Pages_WLAN")
-    if any(ch in page_name for ch in ["/", "\\", "\n", "\r", "\t"]):
-        raise ValueError("page_name 不能包含路径分隔符或换行符")
-    return page_name
-
-
-def rename_page_references(graph: Dict[str, Any], old_name: str, new_name: str) -> None:
-    for transition in graph.get("transitions", []):
-        for field in ("from_page", "to_page"):
-            if transition.get(field) == old_name:
-                transition[field] = new_name
-    traversal = graph.setdefault("traversal_config", {})
-    if traversal.get("root_page") == old_name:
-        traversal["root_page"] = new_name
-    if graph.get("main_page_name") == old_name:
-        graph["main_page_name"] = new_name
 
 # Web API request contracts
-class PointRequest(BaseModel):
-    x: int
-    y: int
-    manual_label: str = ""
-
-
-class TapPointRequest(PointRequest):
-    expect: str = "new_page"
-    effect: str = ""
-
-
-class PageGestureOperationRequest(PointRequest):
-    operate: str
-    effect: str = ""
-
-
-class TapCandidateRequest(BaseModel):
-    index: int
-    expect: str = "new_page"
-    effect: str = ""
-    manual_label: str = ""
-
-
-class SwipeHorizontalRequest(BaseModel):
-    direction: str
-
-
-class NavigateToPageRequest(BaseModel):
-    page_name: str
-
-
-class SetActivePageRequest(BaseModel):
-    page_name: str
-
-
 class RenamePageRequest(BaseModel):
     old_page_name: str
     new_page_name: str
     new_title: str = ""
 
 
-class ConsoleActionRequest(BaseModel):
-    action: str
-    payload: Optional[Dict[str, Any]] = None
-
-
-class RecordActionRequest(BaseModel):
+class ActionRequest(BaseModel):
     action: str
     payload: Optional[Dict[str, Any]] = None
 
@@ -1536,234 +1385,336 @@ class DeleteActionRequest(BaseModel):
     target_type: str
     payload: Optional[Dict[str, Any]] = None
     dry_run: bool = True
-
-
-class DeleteRequest(BaseModel):
-    dry_run: bool = True
-
-
-class DeleteBranchRequest(DeleteRequest):
-    transition_id: str
-    delete_descendants: bool = True
-
-
-class DeleteTransitionRequest(DeleteRequest):
-    transition_id: str
-    delete_orphan_to_state: bool = True
-
-
-class DeletePageRequest(DeleteRequest):
-    page_name: str
-    delete_incoming: bool = True
-    delete_outgoing: bool = True
-
-
-class DeleteCandidateRequest(DeleteRequest):
-    page_name: str
-    candidate_id: str
-    delete_linked_transitions: bool = False
-    delete_linked_operations: bool = False
-
-
-class DeletePageOperationRequest(DeleteRequest):
-    page_name: str
-    operation_id: str
-    delete_revealed_candidates: bool = True
-
-
-class DeleteContinuedCaptureRequest(DeleteRequest):
-    page_name: str
-    capture_id: str
-    delete_candidates_from_capture: bool = True
+    preview_token: str = ""
 
 
 # Web session and graph maintenance
-def warning_for_state(graph: Dict[str, Any], state: Dict[str, Any], has_pending: bool = False) -> str:
-    page = state.get("page_name", "")
-    if page and page != "Pages_root" and not has_pending and not any(item.get("to_page") == page for item in graph.get("transitions", [])):
-        return "当前页面没有 pending transition，且导航图中没有父级来源。说明你可能是手动进入了当前页面，无法自动知道父级页面。请返回父页面后点击候选入口录制。"
-    return ""
-
-
-def ensure_page_consistency(current: Dict[str, Any]) -> None:
-    detected = current.get("state", {}).get("page_name")
-    active = current.get("active_page") or current.get("active_state", {}).get("page_name")
-    if detected and active and detected != active:
-        raise ValueError(f"当前检测页面 {detected} 与 active_page {active} 不一致，请先重新采集或确认当前页面状态后再录制。")
-
-
-def component_changes(before: List[Dict[str, Any]], after: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    before_map = {candidate_merge_key(item): item for item in before if candidate_merge_key(item)}
-    after_map = {candidate_merge_key(item): item for item in after if candidate_merge_key(item)}
-    return ([item for key, item in after_map.items() if key not in before_map], [item for key, item in before_map.items() if key not in after_map])
-
-
-def pending_data(work_dir: Path) -> Optional[Dict[str, Any]]:
-    path = pending_transition_path(work_dir)
-    return load_json(path) if path.exists() else None
-
-
-def pending_action_chain_path(work_dir: Path) -> Path:
-    return navigation_dir(work_dir) / "pending_action_chain.json"
-
-
 def pending_action_chain(work_dir: Path) -> Optional[Dict[str, Any]]:
-    path = pending_action_chain_path(work_dir)
+    path = work_dir / "outputs" / "navigation" / "pending_action_chain.json"
     return load_json(path) if path.exists() else None
-
-
-def save_pending_action_chain(work_dir: Path, chain: Dict[str, Any]) -> None:
-    save_json(chain, pending_action_chain_path(work_dir), "未完成多步骤跳转")
 
 
 def clear_pending_action_chain(work_dir: Path) -> None:
-    path = pending_action_chain_path(work_dir)
+    path = work_dir / "outputs" / "navigation" / "pending_action_chain.json"
     if path.exists():
         path.unlink()
 
 
 def append_web_history(work_dir: Path, event: Dict[str, Any]) -> None:
-    path = navigation_dir(work_dir) / "web_record_history.jsonl"
+    path = work_dir / "outputs" / "navigation" / "web_record_history.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"created_at": now_iso(), **event}, ensure_ascii=False) + "\n")
 
 
+class GraphMaintenance(NavigationGraph):
+    """集中维护一张导航图；删除只执行 ``plan_delete`` 明示的影响。"""
 
-def blank_delete_plan() -> Dict[str, Any]:
-    return {"transitions": [], "states": [], "candidates": [], "page_operations": [], "continued_captures": [], "files": [], "warnings": []}
+    def reachable_pages(self, excluded_transition_ids: Optional[Set[str]] = None) -> Set[str]:
+        excluded_transition_ids = excluded_transition_ids or set()
+        reachable = {"Pages_root"} if "Pages_root" in self.states else set()
+        queue = deque(reachable)
+        outgoing: Dict[str, List[str]] = defaultdict(list)
+        for transition in self.transitions:
+            source, target = str(transition.get("from_page") or ""), str(transition.get("to_page") or "")
+            if (
+                str(transition.get("transition_id") or "") not in excluded_transition_ids
+                and source in self.states
+                and target in self.states
+                and source != target
+            ):
+                outgoing[source].append(target)
+        while queue:
+            source = queue.popleft()
+            for target in outgoing.get(source, []):
+                if target in reachable:
+                    continue
+                reachable.add(target)
+                queue.append(target)
+        return reachable
 
+    def orphan_pages(self, active_page: str = "") -> List[Dict[str, Any]]:
+        unreachable = set(self.states) - self.reachable_pages()
+        pages = []
+        for page in sorted(unreachable):
+            state = self.states[page]
+            pages.append({
+                "page_name": page,
+                "title": str(state.get("last_title") or state.get("page_description") or page),
+                "parent_page": state.get("parent_page") or "",
+                "incoming_count": sum(1 for t in self.transitions if t.get("to_page") == page),
+                "outgoing_count": sum(1 for t in self.transitions if t.get("from_page") == page),
+                "candidate_count": len(state.get("merged_candidates", []) or []),
+                "operation_count": len(state.get("page_operations", []) or []),
+                "continued_capture_count": len(state.get("continued_captures", []) or []),
+                "is_active": page == active_page,
+            })
+        return pages
 
-def cleanup_candidate_refs(graph: Dict[str, Any], plan: Dict[str, Any]) -> None:
-    tids = {str(t.get("transition_id") or t) for t in plan.get("transitions", [])}
-    oids = {str(o.get("operation_id") or o) for o in plan.get("page_operations", [])}
-    for page, state in graph.get("states", {}).items():
-        kept = []
-        for c in state.get("merged_candidates", []) or []:
-            before_tid = set(c.get("transition_ids") or [])
-            before_oid = set(c.get("operation_ids") or [])
-            c["transition_ids"] = [x for x in c.get("transition_ids", []) if x not in tids]
-            c["operation_ids"] = [x for x in c.get("operation_ids", []) if x not in oids]
-            if before_tid - set(c["transition_ids"]) or before_oid - set(c["operation_ids"]):
-                plan["candidates"].append({"page_name": page, "candidate_id": candidate_id(c), "action": "remove_refs"})
-            if c.get("source") == "hit_test_click" and not c.get("transition_ids") and not c.get("operation_ids") and (before_tid or before_oid):
-                plan["candidates"].append({"page_name": page, "candidate_id": candidate_id(c), "action": "delete_orphan_clicked_candidate"})
-                continue
-            kept.append(c)
-        state["merged_candidates"] = kept
+    def plan_delete(self, target_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """一次生成完整删除计划，包含 state 带走的边、操作、续录和候选引用。"""
+        plan: Dict[str, Any] = {
+            "transitions": [],
+            "states": [],
+            "candidates": [],
+            "page_operations": [],
+            "continued_captures": [],
+            "files": [],
+            "warnings": [],
+        }
+        target_type = target_type.strip()
+        transition_by_id = {
+            str(item.get("transition_id")): item
+            for item in self.transitions
+            if item.get("transition_id")
+        }
+        deleted_pages: Set[str] = set()
+        deleted_tids: Set[str] = set()
+        delete_newly_unreachable = False
 
-
-def incoming_count(graph: Dict[str, Any], page: str, ignore_tids: Optional[Set[str]] = None) -> int:
-    ignore_tids = ignore_tids or set()
-    return sum(1 for t in graph.get("transitions", []) if t.get("to_page") == page and t.get("transition_id") not in ignore_tids)
-
-
-def collect_descendant_delete(graph: Dict[str, Any], start_page: str, plan: Dict[str, Any], protected_tids: Set[str]) -> None:
-    if start_page == "Pages_root" or incoming_count(graph, start_page, protected_tids) > 0:
-        return
-    if start_page not in plan["states"]:
-        plan["states"].append(start_page)
-    for op in graph.get("states", {}).get(start_page, {}).get("page_operations", []) or []:
-        if op.get("operation_id"):
-            plan["page_operations"].append({"page_name": start_page, "operation_id": op.get("operation_id")})
-    for cap in graph.get("states", {}).get(start_page, {}).get("continued_captures", []) or []:
-        plan["continued_captures"].append({"page_name": start_page, "capture_id": cap.get("capture_id")})
-    outgoing = [t for t in graph.get("transitions", []) if t.get("from_page") == start_page]
-    for t in outgoing:
-        tid = t.get("transition_id")
-        if tid and tid not in {x.get("transition_id") for x in plan["transitions"]}:
-            plan["transitions"].append(t)
-            protected_tids.add(tid)
-        collect_descendant_delete(graph, str(t.get("to_page")), plan, protected_tids)
-
-
-def apply_delete_plan(graph: Dict[str, Any], plan: Dict[str, Any]) -> None:
-    tids = {str(t.get("transition_id") or t) for t in plan.get("transitions", [])}
-    states = {str(s) for s in plan.get("states", [])}
-    graph["transitions"] = [t for t in graph.get("transitions", []) if t.get("transition_id") not in tids and t.get("from_page") not in states and t.get("to_page") not in states]
-    for page in states:
-        graph.get("states", {}).pop(page, None)
-    cleanup_candidate_refs(graph, plan)
-    for op_ref in plan.get("page_operations", []):
-        page, oid = op_ref.get("page_name"), op_ref.get("operation_id")
-        state = graph.get("states", {}).get(page, {})
-        state["page_operations"] = [op for op in state.get("page_operations", []) if op.get("operation_id") != oid]
-        if plan.get("keep_revealed_candidates"):
-            for c in state.get("merged_candidates", []) or []:
-                if c.get("requires_operation_id") == oid:
-                    c.pop("requires_operation_id", None)
-                c["operation_ids"] = [x for x in c.get("operation_ids", []) if x != oid]
+        if target_type in {"transition", "branch"}:
+            tid = str(payload.get("transition_id") or "")
+            if tid not in transition_by_id:
+                raise ValueError(f"transition 不存在：{tid}")
+            deleted_tids.add(tid)
+            delete_newly_unreachable = bool(payload.get(
+                "delete_descendants" if target_type == "branch" else "delete_orphan_to_state",
+                True,
+            ))
+        elif target_type == "page":
+            page = str(payload.get("page_name") or "")
+            if page == "Pages_root":
+                raise ValueError("不允许删除 Pages_root")
+            if page not in self.states:
+                raise ValueError(f"页面不存在：{page}")
+            # state 被删除后所有相连边都必然失效，因此不提供“保留半边”的虚假选项。
+            deleted_pages.add(page)
+        elif target_type == "orphan_pages":
+            requested = {str(page) for page in payload.get("page_names", []) if str(page)}
+            orphan_names = {item["page_name"] for item in self.orphan_pages()}
+            if not requested:
+                raise ValueError("请选择至少一个孤儿页面")
+            invalid = requested - orphan_names
+            if invalid:
+                raise ValueError(f"这些页面不是孤儿页面：{', '.join(sorted(invalid))}")
+            deleted_pages.update(requested)
+        elif target_type == "candidate":
+            page, cid = str(payload.get("page_name") or ""), str(payload.get("candidate_id") or "")
+            state = self.states.get(page, {})
+            candidates = state.get("merged_candidates", []) or []
+            candidate = next((item for item in candidates if str(item.get("candidate_id") or candidate_merge_key(item)) == cid), None)
+            if not candidate:
+                raise ValueError(f"候选不存在：{cid}")
+            plan["candidates"].append({"page_name": page, "candidate_id": cid, "action": "delete_candidate"})
+            if candidate.get("transition_ids") and not payload.get("delete_linked_transitions", False):
+                plan["warnings"].append("该候选控件关联了已录制跳转，只删除候选可能造成 transition 缺少控件引用。")
+            if payload.get("delete_linked_transitions", False):
+                linked_tids = {str(item) for item in candidate.get("transition_ids", []) or []}
+                missing = linked_tids - set(transition_by_id)
+                if missing:
+                    raise ValueError(f"关联 transition 不存在：{', '.join(sorted(missing))}")
+                deleted_tids.update(linked_tids)
+                delete_newly_unreachable = True
+            if payload.get("delete_linked_operations", False):
+                plan["page_operations"].extend(
+                    {"page_name": page, "operation_id": operation_id}
+                    for operation_id in candidate.get("operation_ids", []) or []
+                )
+        elif target_type == "page_operation":
+            page, oid = str(payload.get("page_name") or ""), str(payload.get("operation_id") or "")
+            state = self.states.get(page, {})
+            operations = state.get("page_operations", []) or []
+            if not any(item.get("operation_id") == oid for item in operations):
+                raise ValueError(f"页面操作不存在：{oid}")
+            plan["page_operations"].append({"page_name": page, "operation_id": oid})
+            delete_revealed = bool(payload.get("delete_revealed_candidates", True))
+            if not delete_revealed:
+                plan["keep_revealed_candidates"] = True
+            for candidate in state.get("merged_candidates", []) or []:
+                references = {
+                    candidate.get("requires_operation_id"),
+                    candidate.get("source_operation_id"),
+                    *(candidate.get("operation_ids") or []),
+                }
+                if oid in references:
+                    plan["candidates"].append({
+                        "page_name": page,
+                        "candidate_id": str(candidate.get("candidate_id") or candidate_merge_key(candidate)),
+                        "action": "delete_revealed" if delete_revealed else "remove_operation_ref",
+                })
+        elif target_type == "continued_capture":
+            page, capture_id = str(payload.get("page_name") or ""), str(payload.get("capture_id") or "")
+            state = self.states.get(page, {})
+            captures = state.get("continued_captures", []) or []
+            capture = next((item for item in captures if item.get("capture_id") == capture_id), None)
+            if not capture:
+                raise ValueError(f"续录不存在：{capture_id}")
+            plan["continued_captures"].append({"page_name": page, "capture_id": capture_id})
+            if capture.get("screenshot"):
+                plan["files"].append(capture["screenshot"])
+            delete_candidates = bool(payload.get("delete_candidates_from_capture", True))
+            if not delete_candidates:
+                plan["keep_capture_candidates"] = True
+            for candidate in state.get("merged_candidates", []) or []:
+                if candidate.get("source_capture_id") == capture_id:
+                    if delete_candidates and (candidate.get("transition_ids") or candidate.get("operation_ids")):
+                        plan["warnings"].append(
+                            f"候选 {candidate.get('candidate_id') or candidate_merge_key(candidate)} 有关联记录，将只移除 source_capture_id"
+                        )
+                    plan["candidates"].append({
+                        "page_name": page,
+                        "candidate_id": str(candidate.get("candidate_id") or candidate_merge_key(candidate)),
+                        "action": "delete_from_capture",
+                    })
         else:
-            state["merged_candidates"] = [c for c in state.get("merged_candidates", []) if c.get("requires_operation_id") != oid and c.get("source_operation_id") != oid]
-    for cap_ref in plan.get("continued_captures", []):
-        page, cid = cap_ref.get("page_name"), cap_ref.get("capture_id")
-        state = graph.get("states", {}).get(page, {})
-        state["continued_captures"] = [c for c in state.get("continued_captures", []) if c.get("capture_id") != cid]
-        if plan.get("keep_capture_candidates"):
-            for c in state.get("merged_candidates", []) or []:
-                if c.get("source_capture_id") == cid:
-                    c.pop("source_capture_id", None)
-        else:
-            state["merged_candidates"] = [c for c in state.get("merged_candidates", []) if c.get("source_capture_id") != cid or c.get("transition_ids") or c.get("operation_ids")]
-    for f in plan.get("files", []):
-        try:
-            path = Path(f)
-            if path.exists():
-                path.unlink()
-        except Exception as exc:
-            plan.setdefault("warnings", []).append(f"删除文件失败 {f}: {exc}")
+            raise ValueError(f"未知删除目标类型：{target_type}")
 
+        if delete_newly_unreachable:
+            # 用 root 可达性差集处理整条孤儿链和脱离 root 的循环；历史孤儿不夹带删除。
+            reachable_pages = self.reachable_pages()
+            reachable_without_deleted = self.reachable_pages(deleted_tids)
+            deleted_pages.update(reachable_pages - reachable_without_deleted)
+            deleted_pages.discard("Pages_root")
 
-def prune_graph_after_delete(graph: Dict[str, Any], work_dir: Path) -> Dict[str, Any]:
-    warnings: List[str] = []
-    states = graph.setdefault("states", {})
-    valid_pages = set(states)
-    graph["transitions"] = [t for t in graph.get("transitions", []) if t.get("from_page") in valid_pages and t.get("to_page") in valid_pages]
-    active_page = ""
-    session_path = work_dir / "outputs" / "navigation" / "current_path_session.json"
-    if session_path.exists():
-        try:
-            active_page = str(load_json(session_path).get("active_page") or "")
-        except Exception:
-            active_page = ""
-    for page in list(states.keys()):
-        if page != "Pages_root" and page != active_page and incoming_count(graph, page) == 0 and not states[page].get("explicit_keep"):
-            states.pop(page, None)
-            warnings.append(f"删除孤儿 state：{page}")
-    valid_pages = set(states)
-    graph["transitions"] = [t for t in graph.get("transitions", []) if t.get("from_page") in valid_pages and t.get("to_page") in valid_pages]
-    valid_tids = {t.get("transition_id") for t in graph.get("transitions", [])}
-    for page, st in list(states.items()):
-        valid_oids = all_operation_ids(st)
-        kept = []
-        for c in st.get("merged_candidates", []) or []:
-            c["transition_ids"] = [tid for tid in c.get("transition_ids", []) if tid in valid_tids]
-            c["operation_ids"] = [oid for oid in c.get("operation_ids", []) if oid in valid_oids]
-            if c.get("requires_operation_id") and c.get("requires_operation_id") not in valid_oids:
+        plan["states"] = sorted(deleted_pages)
+        for page in plan["states"]:
+            state = self.states[page]
+            plan["page_operations"].extend(
+                {"page_name": page, "operation_id": operation["operation_id"]}
+                for operation in state.get("page_operations", []) or []
+                if operation.get("operation_id")
+            )
+            for capture in state.get("continued_captures", []) or []:
+                if capture.get("capture_id"):
+                    plan["continued_captures"].append({
+                        "page_name": page,
+                        "capture_id": capture["capture_id"],
+                    })
+                if capture.get("screenshot"):
+                    plan["files"].append(capture["screenshot"])
+
+        # 删除 state 会必然删除所有相连边；这些边必须全部出现在预览里。
+        plan["transitions"] = [
+            transition for transition in self.transitions
+            if str(transition.get("transition_id") or "") in deleted_tids
+            or transition.get("from_page") in deleted_pages
+            or transition.get("to_page") in deleted_pages
+        ]
+        deleted_tids = {
+            str(item.get("transition_id") or "")
+            for item in plan["transitions"]
+            if item.get("transition_id")
+        }
+
+        deleted_oids: Dict[str, Set[str]] = defaultdict(set)
+        for item in plan["page_operations"]:
+            deleted_oids[str(item.get("page_name") or "")].add(str(item.get("operation_id") or ""))
+        planned_candidates = {
+            (item.get("page_name"), item.get("candidate_id"))
+            for item in plan["candidates"]
+        }
+        for page, state in self.states.items():
+            if page in deleted_pages:
                 continue
-            kept.append(c)
-        st["merged_candidates"] = kept
-        caps = []
-        for cap in st.get("continued_captures", []) or []:
-            f = cap.get("screenshot")
-            if f and not Path(f).exists():
-                warnings.append(f"续录截图缺失：{f}")
-            caps.append(cap)
-        st["continued_captures"] = caps
-        st["incoming_count"] = incoming_count(graph, page)
-        st["outgoing_count"] = sum(1 for t in graph.get("transitions", []) if t.get("from_page") == page)
-        st["candidate_count"] = len(st.get("merged_candidates", []) or [])
-        st["operation_count"] = len(st.get("page_operations", []) or [])
-        st["continued_capture_count"] = len(st.get("continued_captures", []) or [])
-    return {"warnings": warnings}
+            page_oids = deleted_oids.get(page, set())
+            for candidate in state.get("merged_candidates", []) or []:
+                old_tids = set(candidate.get("transition_ids") or [])
+                old_oids = set(candidate.get("operation_ids") or [])
+                if not (old_tids & deleted_tids or old_oids & page_oids):
+                    continue
+                cid = str(candidate.get("candidate_id") or candidate_merge_key(candidate))
+                if (page, cid) in planned_candidates:
+                    continue
+                action = "remove_refs"
+                if (
+                    candidate.get("source") == "hit_test_click"
+                    and not (old_tids - deleted_tids)
+                    and not (old_oids - page_oids)
+                ):
+                    action = "delete_orphan_clicked_candidate"
+                plan["candidates"].append({
+                    "page_name": page,
+                    "candidate_id": cid,
+                    "action": action,
+                })
+                planned_candidates.add((page, cid))
+        return plan
 
+    def apply_delete(self, plan: Dict[str, Any]) -> List[str]:
+        runtime_warnings: List[str] = []
+        deleted_tids = {str(item.get("transition_id") or "") for item in plan.get("transitions", [])}
+        deleted_pages = {str(page) for page in plan.get("states", [])}
+        deleted_oids: Dict[str, Set[str]] = defaultdict(set)
+        for item in plan.get("page_operations", []):
+            deleted_oids[str(item.get("page_name") or "")].add(str(item.get("operation_id") or ""))
+        # plan_delete 已把删除 state 带走的所有边列入预览；这里不做额外孤儿清理。
+        self.graph["transitions"] = [
+            transition for transition in self.transitions
+            if transition.get("transition_id") not in deleted_tids
+            and transition.get("from_page") not in deleted_pages
+            and transition.get("to_page") not in deleted_pages
+        ]
+        self.transitions = self.graph["transitions"]
+        for page in deleted_pages:
+            self.states.pop(page, None)
 
-def plan_delete_transition(graph: Dict[str, Any], transition_id_value: str, delete_orphan_to_state: bool) -> Dict[str, Any]:
-    plan = blank_delete_plan()
-    t = transition_lookup(graph).get(transition_id_value)
-    if not t:
-        raise ValueError(f"transition 不存在：{transition_id_value}")
-    plan["transitions"].append(t)
-    if delete_orphan_to_state:
-        collect_descendant_delete(graph, str(t.get("to_page")), plan, {transition_id_value})
-    return plan
+        candidate_actions = {
+            (item.get("page_name"), item.get("candidate_id")): item.get("action")
+            for item in plan.get("candidates", [])
+        }
+        capture_ids = {
+            (item.get("page_name"), item.get("capture_id"))
+            for item in plan.get("continued_captures", [])
+        }
+        for page, state in self.states.items():
+            page_oids = deleted_oids.get(page, set())
+            operations = state.get("page_operations", []) or []
+            captures = state.get("continued_captures", []) or []
+            state["page_operations"] = [
+                operation for operation in operations
+                if operation.get("operation_id") not in page_oids
+            ]
+            state["continued_captures"] = [
+                capture for capture in captures
+                if (page, capture.get("capture_id")) not in capture_ids
+            ]
+            kept_candidates = []
+            for candidate in state.get("merged_candidates", []) or []:
+                cid = str(candidate.get("candidate_id") or candidate_merge_key(candidate))
+                action = candidate_actions.get((page, cid))
+                transition_ids = [item for item in candidate.get("transition_ids", []) if item not in deleted_tids]
+                operation_ids = [item for item in candidate.get("operation_ids", []) if item not in page_oids]
+                candidate["transition_ids"] = transition_ids
+                candidate["operation_ids"] = operation_ids
+                if action in {"delete_candidate", "delete_orphan_clicked_candidate", "delete_revealed"}:
+                    continue
+                if action == "remove_operation_ref":
+                    if candidate.get("requires_operation_id") in page_oids:
+                        candidate.pop("requires_operation_id", None)
+                    if candidate.get("source_operation_id") in page_oids:
+                        candidate.pop("source_operation_id", None)
+                if action == "delete_from_capture":
+                    capture_id = str(candidate.get("source_capture_id") or "")
+                    has_links = bool(transition_ids or operation_ids)
+                    if not plan.get("keep_capture_candidates") and not has_links:
+                        continue
+                    if (page, capture_id) in capture_ids:
+                        candidate.pop("source_capture_id", None)
+                kept_candidates.append(candidate)
+            state["merged_candidates"] = kept_candidates
+
+        for file_name in plan.get("files", []):
+            try:
+                path = Path(file_name)
+                if path.exists():
+                    path.unlink()
+            except Exception as exc:
+                runtime_warnings.append(f"删除文件失败 {file_name}: {exc}")
+        # 只刷新派生计数；不顺手清理计划外的旧坏引用。
+        for page, state in self.states.items():
+            state["incoming_count"] = sum(1 for t in self.transitions if t.get("to_page") == page)
+            state["outgoing_count"] = sum(1 for t in self.transitions if t.get("from_page") == page)
+            state["candidate_count"] = len(state.get("merged_candidates", []) or [])
+            state["operation_count"] = len(state.get("page_operations", []) or [])
+            state["continued_capture_count"] = len(state.get("continued_captures", []) or [])
+        return runtime_warnings

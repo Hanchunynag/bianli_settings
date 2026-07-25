@@ -207,6 +207,11 @@ button:not(.secondary):not(.danger) {
 }
 
 button.secondary { background: var(--panel); color: var(--primary); }
+button.popupTypeButton.isArmed {
+  background: var(--primary);
+  color: #ffffff;
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
 button.danger { border-color: var(--danger); background: var(--danger); color: #ffffff; }
 button:disabled { opacity: .55; cursor: not-allowed; }
 

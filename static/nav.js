@@ -1,63 +1,62 @@
-import { api, postJson, requestJson } from './nav/api.js';
+import { api, postJson } from './nav/api.js';
 import { el } from './nav/dom.js';
-import { store } from './nav/state.js?v=tree-directory-5';
-import { render, renderOverlay } from './nav/render.js?v=page-identity-1';
+import { store } from './nav/state.js';
+import { refreshOrphans, render, renderOverlay } from './nav/render.js';
 
-const consoleAction = (action, payload = {}) => postJson('/api/console_action', { action, payload });
-const recordAction = (action, payload = {}) => postJson('/api/record_action', { action, payload });
-const recorderModes = {
-  popupMode: ['popupModeBtn', '开始记录弹窗操作', '停止记录弹窗操作'],
+const popupTypeButtons = [...document.querySelectorAll('[data-popup-type]')];
+const popupTypes = new Set(popupTypeButtons.map((button) => button.dataset.popupType));
+
+function selectPopupType(popupType = null, rerender = true) {
+  store.popupType = popupType && popupTypes.has(popupType) ? popupType : null;
+  popupTypeButtons.forEach((button) => {
+    const selected = button.dataset.popupType === store.popupType;
+    button.classList.toggle('isArmed', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
+  if (rerender) render(store.data);
+}
+
+el('captureBtn').onclick = async () => render(await postJson('/api/console_action', { action: 'capture_current', payload: {} }));
+el('backBtn').onclick = async () => render(await postJson('/api/console_action', { action: 'system_back', payload: {} }));
+el('clearPendingBtn').onclick = async () => render(await postJson('/api/console_action', { action: 'clear_pending', payload: {} }));
+el('orphanBtn').onclick = refreshOrphans;
+popupTypeButtons.forEach((button) => {
+  button.onclick = () => selectPopupType(button.dataset.popupType);
+});
+el('graphBtn').onclick = async () => {
+  const data = await api('/api/graph');
+  if (!data) return;
+  const box = el('graphBox');
+  box.textContent = JSON.stringify(data, null, 2);
+  box.classList.toggle('hidden');
 };
 
-function toggleRecorderMode(selectedMode) {
-  const enabled = !store[selectedMode];
-  Object.entries(recorderModes).forEach(([mode, [buttonId, startText, stopText]]) => {
-    store[mode] = mode === selectedMode && enabled;
-    el(buttonId).textContent = store[mode] ? stopText : startText;
-  });
-  render(store.data);
-}
-
-function screenRecordRequest(x, y) {
-  const point = { x, y, manual_label: '' };
-  if (store.popupMode) return ['popup_tap', point];
-  return ['tap_point', { ...point, expect: 'new_page', effect: '' }];
-}
-
-function bindCommandButtons() {
-  el('captureBtn').onclick = async () => render(await consoleAction('capture_current'));
-  el('backBtn').onclick = async () => render(await consoleAction('system_back'));
-  el('clearPendingBtn').onclick = async () => render(await consoleAction('clear_pending'));
-  Object.entries(recorderModes).forEach(([mode, [buttonId]]) => {
-    el(buttonId).onclick = () => toggleRecorderMode(mode);
-  });
-  el('graphBtn').onclick = async () => {
-    const data = await requestJson('/api/graph').catch((err) => ({ error: err.message }));
-    const box = el('graphBox');
-    box.textContent = JSON.stringify(data, null, 2);
-    box.classList.toggle('hidden');
+el('screen').addEventListener('click', async (event) => {
+  if (!store.data?.screen_metrics?.screen_size || store.busy) return;
+  const rect = el('screen').getBoundingClientRect();
+  const [screenWidth, screenHeight] = store.data.screen_metrics.screen_size;
+  const point = {
+    x: Math.round((event.clientX - rect.left) / rect.width * screenWidth),
+    y: Math.round((event.clientY - rect.top) / rect.height * screenHeight),
+    manual_label: '',
   };
-}
-
-function bindScreenRecorder() {
-  el('screen').addEventListener('click', async (event) => {
-    if (!store.data?.screen_metrics?.screen_size || store.busy) return;
-    const rect = el('screen').getBoundingClientRect();
-    const [screenWidth, screenHeight] = store.data.screen_metrics.screen_size;
-    const x = Math.round((event.clientX - rect.left) / rect.width * screenWidth);
-    const y = Math.round((event.clientY - rect.top) / rect.height * screenHeight);
-    const [action, payload] = screenRecordRequest(x, y);
-    let data = await recordAction(action, payload);
+  const popupType = store.popupType;
+  const action = popupType ? 'popup_tap' : 'tap_point';
+  const payload = popupType
+    ? { ...point, popup_type: popupType }
+    : { ...point, expect: 'new_page', effect: '' };
+  let data = null;
+  try {
+    data = await postJson('/api/record_action', { action, payload });
     if (data?.needs_manual_label) {
       const label = window.prompt(data.message || '请填写该控件的稳定描述');
-      if (label) data = await recordAction(action, { ...payload, manual_label: label });
+      if (label) data = await postJson('/api/record_action', { action, payload: { ...payload, manual_label: label } });
     }
-    render(data);
-  });
+  } finally {
+    if (popupType) selectPopupType(null, false);
+  }
+  render(data);
+});
 
-  window.addEventListener('resize', () => renderOverlay([]));
-}
-
-bindCommandButtons();
-bindScreenRecorder();
+window.addEventListener('resize', renderOverlay);
 api('/api/state').then(render);

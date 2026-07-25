@@ -3,10 +3,13 @@
 """FastAPI 设置导航录制 Web 控制台。"""
 
 import argparse
+import hashlib
+import hmac
+import json
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     from fastapi import FastAPI, Request
@@ -19,96 +22,59 @@ except ImportError as exc:  # pragma: no cover - 给用户明确安装提示
 from settings_ui_manual_recorder import (
     DEFAULT_DEVICE_ID,
     DEFAULT_WORK_DIR,
-    ConsoleActionRequest,
+    ActionRequest,
     DeleteActionRequest,
-    DeleteBranchRequest,
-    DeleteCandidateRequest,
-    DeleteContinuedCaptureRequest,
-    DeletePageOperationRequest,
-    DeletePageRequest,
-    DeleteTransitionRequest,
-    NavigateToPageRequest,
-    PageGestureOperationRequest,
-    PointRequest,
-    RecordActionRequest,
+    GraphMaintenance,
+    NavigationGraph,
+    NavigationGraphRepository,
     RenamePageRequest,
-    SetActivePageRequest,
-    SwipeHorizontalRequest,
-    TapCandidateRequest,
-    TapPointRequest,
-    active_navigation_state,
-    add_transition,
     annotate,
     append_web_history,
     build_navigation_state,
     build_page_directory,
-    blank_delete_plan,
-    bfs_path,
     build_semantic_target_from_node,
     candidate_from_auto,
-    candidate_id,
     candidate_merge_key,
     component_summary_from_tree,
-    component_changes,
-    components_signature,
     clear_pending_action_chain,
-    capture_artifacts,
-    capture_ui_tree_only,
+    capture_device,
     contextualize_child_state,
     current_session_page,
-    execute_back,
-    execute_gesture_operation,
-    execute_horizontal_swipe,
-    execute_tap,
-    ensure_page_consistency,
+    execute_device_input,
     extract_navigation_candidates,
-    find_candidate_center_for_target,
     hit_test_full_ui_tree,
-    horizontal_target,
     load_json,
-    load_navigation_graph,
-    navigation_graph_path,
-    next_horizontal_view_state,
-    next_page_operation_id,
     now_iso,
     pending_transition_path,
     pending_action_chain,
-    pending_data,
     resolve_detected_state,
     save_current_path_session,
     save_json,
-    save_navigation_graph,
-    save_pending_action_chain,
     screen_metrics_from_root,
-    state_matches_graph_page,
     states_represent_same_page,
-    transition_id,
-    transition_id_for_steps,
-    transition_step,
-    transition_steps,
-    transition_steps_label,
     upsert_candidate,
     upsert_clicked_target_as_candidate,
-    upsert_page_variant,
     get_page_merged_candidates,
-    page_operation_id,
-    plan_delete_transition,
-    prune_graph_after_delete,
-    rename_page_references,
     step_target,
-    validate_page_name_for_rename,
-    warning_for_state,
-    apply_delete_plan,
 )
 
 APP_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Settings Navigation Recorder")
+POPUP_TYPES = ("SheetWrapper", "Dialog", "MenuWrapper")
+POPUP_TYPE_SET = frozenset(POPUP_TYPES)
 
 
 class ServerConfig:
-    work_dir: Path = DEFAULT_WORK_DIR
-    device_id: str = DEFAULT_DEVICE_ID
-    output_dir: Path = DEFAULT_WORK_DIR / "outputs" / "latest"
+    def __init__(
+        self,
+        work_dir: Path = DEFAULT_WORK_DIR,
+        device_id: str = DEFAULT_DEVICE_ID,
+        output_dir: Optional[Path] = None,
+    ) -> None:
+        self.work_dir = Path(work_dir)
+        self.device_id = device_id
+        self.output_dir = Path(output_dir) if output_dir else self.work_dir / "outputs" / "latest"
+        self.graphs = NavigationGraphRepository(self.work_dir)
 
 
 config = ServerConfig()
@@ -118,125 +84,103 @@ def ok_response(**kwargs: Any) -> JSONResponse:
     return JSONResponse({"ok": True, **kwargs})
 
 
-def error_response(message: str) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": message})
-
-
 @app.exception_handler(Exception)
 def api_error(_request: Request, exc: Exception) -> JSONResponse:
     """所有 API 使用统一错误结构，业务路由只保留正常流程。"""
-    return error_response(str(exc))
+    return JSONResponse({"ok": False, "error": str(exc)})
 
 
 def read_current_state(
-    capture: bool,
-    persist_candidates: bool = True,
+    capture: bool = False,
     preferred_page: str = "",
+    snapshot: Optional[Dict[str, Any]] = None,
+    graph: Optional[Dict[str, Any]] = None,
+    active_page: str = "",
+    message: str = "",
 ) -> Dict[str, Any]:
-    """采集或读取 latest 文件，更新导航图状态并返回前端需要的数据。"""
-    if capture and not capture_artifacts(config.device_id, config.output_dir):
-        raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
-    json_path = config.output_dir / "current_ui_tree.json"
-    screen_path = config.output_dir / "current_screen.png"
-    if not json_path.exists() or not screen_path.exists():
-        raise FileNotFoundError("outputs/latest/current_ui_tree.json 或 current_screen.png 不存在，请先点击“重新采集”。")
-    root_json = load_json(json_path)
-    annotate(root_json)
-    state = build_navigation_state(root_json)
-    graph = load_navigation_graph(config.work_dir)
-    state = resolve_detected_state(graph, state, preferred_page or current_session_page(config.work_dir))
-    existing_state = graph.get("states", {}).get(state["page_name"], {})
-    if isinstance(existing_state, dict):
-        preserve_keys = ["page_operations", "page_variants", "merged_candidates"]
-        state.update({k: existing_state[k] for k in preserve_keys if k in existing_state})
-    if persist_candidates:
-        graph.setdefault("states", {})[state["page_name"]] = state
-    candidates = extract_navigation_candidates(root_json)
-    if persist_candidates:
-        state_entry = graph.setdefault("states", {}).setdefault(state["page_name"], state)
-        for c in candidates:
-            upsert_candidate(state_entry, candidate_from_auto(c, source="auto_detected"))
-        save_navigation_graph(graph, config.work_dir)
-    active_state = active_navigation_state(config.work_dir, graph, state)
-    active_page = active_state.get("page_name")
-    merged_candidates = get_page_merged_candidates(graph, str(active_page or state["page_name"]), candidates)
-    return {
+    """读取 latest 或复用刚采集的 snapshot，统一生成前端状态。"""
+    graph = graph if graph is not None else config.graphs.load()
+    if snapshot:
+        root_json, state = snapshot["root"], snapshot["state"]
+        state = resolve_detected_state(graph, state, active_page)
+        active_state = graph.get("states", {}).get(active_page, state)
+        candidates = extract_navigation_candidates(root_json)
+        merged_candidates = get_page_merged_candidates(graph, active_page, [])
+    else:
+        if capture and not capture_device(config.device_id, config.output_dir, include_screen=True):
+            raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
+        json_path = config.output_dir / "current_ui_tree.json"
+        if not json_path.exists() or not (config.output_dir / "current_screen.png").exists():
+            raise FileNotFoundError("outputs/latest/current_ui_tree.json 或 current_screen.png 不存在，请先点击“重新采集”。")
+        root_json = load_json(json_path)
+        annotate(root_json)
+        state = resolve_detected_state(
+            graph,
+            build_navigation_state(root_json),
+            preferred_page or current_session_page(config.work_dir),
+        )
+        stored_state = graph.get("states", {}).get(state["page_name"], {})
+        if isinstance(stored_state, dict):
+            state.update({key: stored_state[key] for key in ("page_operations", "page_variants", "merged_candidates") if key in stored_state})
+        candidates = extract_navigation_candidates(root_json)
+        # GET /api/state 只读。否则删除当前孤儿页后，浏览器刷新会根据仍停留
+        # 在该页的旧 UI 树立即把它写回导航图；只有显式“采集当前界面”才落图。
+        if capture:
+            graph["states"][state["page_name"]] = state
+            for candidate in candidates:
+                upsert_candidate(state, candidate_from_auto(candidate, source="auto_detected"))
+            config.graphs.save(graph)
+        active_state = {**stored_state, **state} if isinstance(stored_state, dict) else state
+        active_page = str(active_state.get("page_name") or "")
+        merged_candidates = get_page_merged_candidates(graph, active_page or state["page_name"], candidates)
+    pending_path = pending_transition_path(config.work_dir)
+    pending = load_json(pending_path) if pending_path.exists() else None
+    action_chain = pending_action_chain(config.work_dir)
+    page_name = state.get("page_name", "")
+    warning = (
+        "当前页面没有 pending transition，且导航图中没有父级来源。说明你可能是手动进入了当前页面，"
+        "无法自动知道父级页面。请返回父页面后点击候选入口录制。"
+        if page_name and page_name != "Pages_root" and not pending_path.exists()
+        and not action_chain and not any(item.get("to_page") == page_name for item in graph.get("transitions", []))
+        else ""
+    )
+    response = {
         "state": state,
         "active_state": active_state,
         "active_page": active_page,
+        "popup_types": list(POPUP_TYPES),
         "current_candidates": candidates,
         "candidates": candidates,
         "merged_candidates": merged_candidates,
-        "pending": pending_data(config.work_dir),
-        "pending_action_chain": pending_action_chain(config.work_dir),
-        "warning": warning_for_state(graph, state, pending_transition_path(config.work_dir).exists() or bool(pending_action_chain(config.work_dir))),
+        "pending": pending,
+        "pending_action_chain": action_chain,
+        "warning": warning,
         "screenshot_url": f"/screen?t={int(time.time() * 1000)}",
         "screen_metrics": screen_metrics_from_root(root_json),
     }
+    if message:
+        response["message"] = message
+    return response
 
 
-def state_response_from_capture(
-    root_json: Dict[str, Any],
-    state: Dict[str, Any],
-    graph: Dict[str, Any],
-    active_page: str,
-    message: str = "",
-) -> Dict[str, Any]:
-    state = resolve_detected_state(graph, state, active_page)
-    candidates = extract_navigation_candidates(root_json)
-    return {
-        "state": state,
-        "active_state": graph.get("states", {}).get(active_page, state),
-        "active_page": active_page,
-        "current_candidates": candidates,
-        "candidates": candidates,
-        "merged_candidates": get_page_merged_candidates(graph, active_page, []),
-        "pending": pending_data(config.work_dir),
-        "pending_action_chain": pending_action_chain(config.work_dir),
-        "warning": warning_for_state(graph, state, pending_transition_path(config.work_dir).exists() or bool(pending_action_chain(config.work_dir))),
-        "screenshot_url": f"/screen?t={int(time.time() * 1000)}",
-        "screen_metrics": screen_metrics_from_root(root_json),
-        "message": message,
-    }
-
-
-def capture_state_without_graph_write(ui_tree_only: bool = False) -> Dict[str, Any]:
+def capture_state_without_graph_write() -> Dict[str, Any]:
     """采集并解析设备状态，但不修改导航图。"""
-    capture = capture_ui_tree_only if ui_tree_only else capture_artifacts
-    if not capture(config.device_id, config.output_dir):
+    if not capture_device(config.device_id, config.output_dir, include_screen=True):
         raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
     root_json = load_json(config.output_dir / "current_ui_tree.json")
     annotate(root_json)
     state = build_navigation_state(root_json)
-    graph = load_navigation_graph(config.work_dir)
+    graph = config.graphs.load()
     state = resolve_detected_state(graph, state, current_session_page(config.work_dir))
     return {"root": root_json, "state": state}
 
 
-def prepare_operation(
-    x: int, y: int, manual_label: str, event: str,
-    strict_page: bool = True, debug: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """完成三种页面内录制共用的采集、页面校验和语义命中。"""
-    before = capture_state_without_graph_write()
-    graph = load_navigation_graph(config.work_dir)
-    active = active_navigation_state(config.work_dir, graph, before["state"])
-    active_page = str(active.get("page_name") or before["state"].get("page_name") or "")
-    if not active_page:
-        raise ValueError("无法确定当前页面，不能保存页面操作。")
-    if strict_page and before["state"].get("page_name") != active_page:
-        raise ValueError(
-            f"当前检测页面 {before['state'].get('page_name')} 与 active_page {active_page} 不一致，"
-            "请先重新采集或确认当前页面状态后再录制。"
-        )
-    hit = hit_test_full_ui_tree(before["root"], int(x), int(y))
-    target = build_semantic_target_from_node(hit, manual_label=manual_label.strip())
-    append_web_history(config.work_dir, {
-        "event": event,
-        "page_name": active_page,
-        "debug": {"point": [int(x), int(y)], "hit_node": hit, "needs_manual_label": bool(target.get("needs_manual_label")), **(debug or {})},
-    })
-    return {"before": before, "graph": graph, "active_page": active_page, "hit": hit, "target": target}
+def normalize_popup_type(value: Any) -> str:
+    popup_type = str(value or "").strip()
+    if popup_type not in POPUP_TYPE_SET:
+        allowed = "、".join(POPUP_TYPES)
+        raise ValueError(f"弹窗类型无效：{popup_type or '未指定'}；可选类型：{allowed}")
+    return popup_type
 
 
 def record_page_operation(
@@ -247,32 +191,80 @@ def record_page_operation(
     operate: str = "tap",
     effect: str = "",
     manual_label: str = "",
+    popup_type: str = "",
 ) -> Dict[str, Any]:
-    """统一录制页面内操作；popup 即使识别为 Overlay_xxx 也始终归属点击前的 active_page。"""
-    events = {"popup": "popup_tap", "same_page": "tap_same_page_operation", "gesture": "page_gesture_operation"}
-    debug = {"operate": operate, "effect": effect} if mode == "gesture" else None
-    ctx = prepare_operation(x, y, manual_label, events[mode], strict_page=mode != "popup", debug=debug)
-    before, graph, active_page, hit, target = (ctx[k] for k in ("before", "graph", "active_page", "hit", "target"))
+    """统一录制页面内操作；popup 始终归属点击前的 active_page。"""
+    if mode not in {"popup", "same_page", "gesture"}:
+        raise ValueError(f"未知页面内操作模式：{mode}")
+
+    selected_popup_type = normalize_popup_type(popup_type) if mode == "popup" else ""
+    before = capture_state_without_graph_write()
+    graph = config.graphs.load()
+    stored_state = graph.get("states", {}).get(before["state"].get("page_name", ""))
+    active = {**stored_state, **before["state"]} if isinstance(stored_state, dict) else before["state"]
+    active_page = str(active.get("page_name") or before["state"].get("page_name") or "")
+    if not active_page:
+        raise ValueError("无法确定当前页面，不能保存页面操作。")
+    if mode != "popup" and before["state"].get("page_name") != active_page:
+        raise ValueError(
+            f"当前检测页面 {before['state'].get('page_name')} 与 active_page {active_page} 不一致，"
+            "请先重新采集或确认当前页面状态后再录制。"
+        )
+
+    hit = hit_test_full_ui_tree(before["root"], int(x), int(y))
+    target = build_semantic_target_from_node(hit, manual_label=manual_label.strip())
+    debug = {
+        "point": [int(x), int(y)],
+        "hit_node": hit,
+        "needs_manual_label": bool(target.get("needs_manual_label")),
+    }
+    if mode == "popup":
+        debug["popup_type"] = selected_popup_type
+    if mode == "gesture":
+        debug.update({"operate": operate, "effect": effect})
+    event_name = (
+        "popup_tap"
+        if mode == "popup"
+        else "tap_same_page_operation"
+        if mode == "same_page"
+        else "page_gesture_operation"
+    )
+    append_web_history(
+        config.work_dir,
+        {
+            "event": event_name,
+            "page_name": active_page,
+            "debug": debug,
+        },
+    )
 
     if target.get("needs_manual_label"):
-        messages = {
-            "popup": "命中控件缺少稳定 key/text，请填写操作描述。",
-            "same_page": "命中控件缺少稳定 key/text，请手动填写描述后再保存。",
-            "gesture": "命中区域缺少稳定 key/text，请手动填写操作对象描述后再保存。",
-        }
         current = (
-            state_response_from_capture(before["root"], before["state"], graph, active_page)
-            if mode == "popup" else read_current_state(capture=False)
+            read_current_state(snapshot=before, graph=graph, active_page=active_page)
+            if mode == "popup"
+            else read_current_state(capture=False)
         )
-        flags = {"popup": "popup_mode", "same_page": "same_page_mode", "gesture": "page_operation_mode"}
         details = {"operate": operate, "effect": effect} if mode == "gesture" else {}
-        return {**current, **details, "needs_manual_label": True, "hit_node": hit, flags[mode]: True, "message": messages[mode]}
+        return {
+            **current,
+            **details,
+            "needs_manual_label": True,
+            "hit_node": hit,
+            "popup_mode" if mode == "popup" else "same_page_mode" if mode == "same_page" else "page_operation_mode": True,
+            "message": (
+                "命中控件缺少稳定 key/text，请填写操作描述。"
+                if mode == "popup"
+                else "命中控件缺少稳定 key/text，请手动填写描述后再保存。"
+                if mode == "same_page"
+                else "命中区域缺少稳定 key/text，请手动填写操作对象描述后再保存。"
+            ),
+        }
 
     before_components = component_summary_from_tree(before["root"])
     if mode == "gesture":
-        execute_gesture_operation(config.device_id, operate, [int(x), int(y)], screen_metrics_from_root(before["root"]))
+        execute_device_input(config.device_id, operate, [int(x), int(y)], screen_metrics_from_root(before["root"]))
     else:
-        execute_tap(config.device_id, [int(x), int(y)])
+        execute_device_input(config.device_id, "tap", [int(x), int(y)])
     time.sleep(1.0 if mode == "gesture" else 1.2)
     after = capture_state_without_graph_write()
     if mode != "popup" and not states_represent_same_page(after["state"], before["state"]):
@@ -284,26 +276,51 @@ def record_page_operation(
         return {"ok": False, "error": message}
 
     after_components = component_summary_from_tree(after["root"])
-    revealed, hidden = component_changes(before_components, after_components)
+    before_map = {candidate_merge_key(item): item for item in before_components if candidate_merge_key(item)}
+    after_map = {candidate_merge_key(item): item for item in after_components if candidate_merge_key(item)}
+    before_signature = hashlib.sha256(json.dumps(sorted(before_map), ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+    after_signature = hashlib.sha256(json.dumps(sorted(after_map), ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+    revealed = [item for key, item in after_map.items() if key not in before_map]
+    hidden = [item for key, item in before_map.items() if key not in after_map]
     state = graph.setdefault("states", {}).setdefault(active_page, before["state"])
     state.update(before["state"])
-    operation_id = (
-        next_page_operation_id(state)
-        if mode == "popup"
-        else page_operation_id(active_page, {**target, "operate": operate, "effect": effect})
-    )
+    if mode == "popup":
+        max_index = 0
+        for item in state.get("page_operations", []) or []:
+            existing_id = str(item.get("operation_id") or "")
+            suffix = existing_id.removeprefix("operation")
+            if existing_id.startswith("operation") and suffix.isdigit():
+                max_index = max(max_index, int(suffix))
+        operation_id = f"operation{max_index + 1}"
+    else:
+        description = str(target.get("key_description") or target.get("step_prompt") or target.get("value") or "操作")
+        safe_description = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in description).strip("_") or "operation"
+        digest = hashlib.sha1(json.dumps([active_page, target.get("type"), target.get("value"), description], ensure_ascii=False).encode("utf-8")).hexdigest()[:8]
+        operation_id = f"{active_page}__op__{safe_description}_{digest}"
     if mode == "same_page":
-        revealed = [{**item, "source": "page_operation", "source_operation_id": operation_id, "requires_operation_id": operation_id} for item in revealed]
+        revealed = [
+            {**item, "source": "page_operation", "source_operation_id": operation_id, "requires_operation_id": operation_id}
+            for item in revealed
+        ]
         hidden = [{**item, "source_operation_id": operation_id} for item in hidden]
+    operation_target = dict(target)
+    if mode == "popup":
+        operation_target["type"] = selected_popup_type
+    else:
+        component_type = str(hit.get("component_type") if hit else "")
+        if component_type:
+            operation_target["type"] = component_type
     operation = {
         "operation_id": operation_id,
         "created_at": now_iso(),
         "operate": operate,
         "effect": "open_popup" if mode == "popup" else effect or ("content_changed" if mode == "same_page" else "same_page_state_changed"),
-        "target": step_target(target) if mode == "popup" else target,
-        "before_signature": components_signature(before_components),
-        "after_signature": components_signature(after_components),
+        "target": step_target(operation_target, include_type=True),
+        "before_signature": before_signature,
+        "after_signature": after_signature,
     }
+    if mode == "popup":
+        operation["popup_type"] = selected_popup_type
     if mode != "gesture":
         operation.update({"revealed_candidates": revealed, "hidden_candidates": hidden})
     operations = state.setdefault("page_operations", [])
@@ -312,16 +329,48 @@ def record_page_operation(
     operations.append(operation)
     upsert_clicked_target_as_candidate(graph, active_page, target, operation_id=operation_id)
     if mode == "same_page":
-        upsert_page_variant(state, operation, revealed, hidden)
+        variant_payload = [
+            str(state.get("page_name") or active_page),
+            operation.get("operation_id"),
+            operation.get("effect"),
+            operation.get("after_signature"),
+        ]
+        variant = {
+            "variant_id": (
+                f"{state.get('page_name') or active_page}__variant__"
+                f"{hashlib.sha1(json.dumps(variant_payload, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()[:10]}"
+            ),
+            "created_at": now_iso(),
+            "trigger_operation_id": operation.get("operation_id"),
+            "trigger": operation.get("target") or {},
+            "operate": operation.get("operate") or "tap",
+            "effect": operation.get("effect") or "same_page_state_changed",
+            "before_signature": operation.get("before_signature"),
+            "after_signature": operation.get("after_signature"),
+            "revealed_candidates": revealed,
+            "hidden_candidates": hidden,
+            "is_mutually_exclusive": bool(revealed and hidden),
+        }
+        variants = state.setdefault("page_variants", [])
+        variants[:] = [item for item in variants if item.get("variant_id") != variant["variant_id"]]
+        variants.append(variant)
         for item in revealed:
             item.setdefault("candidate_id", candidate_merge_key(item))
             upsert_candidate(state, item)
-    save_navigation_graph(graph, config.work_dir)
+    config.graphs.save(graph)
 
     if mode == "popup":
-        message = f"已记录弹窗操作 {operation_id}：新增 {len(revealed)} 个控件，消失 {len(hidden)} 个控件。"
+        message = (
+            f"已记录弹窗操作 {operation_id}（{selected_popup_type}）："
+            f"新增 {len(revealed)} 个控件，消失 {len(hidden)} 个控件。"
+        )
         # 保留点击前页面身份，只用点击后的树刷新截图、候选控件和屏幕尺寸。
-        return state_response_from_capture(after["root"], before["state"], graph, active_page, message=message)
+        return read_current_state(
+            snapshot={"root": after["root"], "state": before["state"]},
+            graph=graph,
+            active_page=active_page,
+            message=message,
+        )
     refreshed = read_current_state(capture=False)
     message = (
         f"已记录页面内变化：新增 {len(revealed)} 个控件，消失 {len(hidden)} 个控件。"
@@ -329,18 +378,6 @@ def record_page_operation(
         else f"已记录页面内操作：{operate} / {operation['effect']}"
     )
     return {**refreshed, "message": message}
-
-
-def record_popup_operation(x: int, y: int, manual_label: str = "") -> Dict[str, Any]:
-    return record_page_operation(x, y, mode="popup", manual_label=manual_label)
-
-
-def record_same_page_operation(x: int, y: int, manual_label: str = "") -> Dict[str, Any]:
-    return record_page_operation(x, y, mode="same_page", manual_label=manual_label)
-
-
-def record_page_gesture_operation(x: int, y: int, operate: str, effect: str = "", manual_label: str = "") -> Dict[str, Any]:
-    return record_page_operation(x, y, mode="gesture", operate=operate, effect=effect, manual_label=manual_label)
 
 
 def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = "", manual_label: str = "") -> Dict[str, Any]:
@@ -352,7 +389,10 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
         from_page = str(chain["from_page"])
     else:
         current = read_current_state(capture=False)
-        ensure_page_consistency(current)
+        detected = current.get("state", {}).get("page_name")
+        active = current.get("active_page") or current.get("active_state", {}).get("page_name")
+        if detected and active and detected != active:
+            raise ValueError(f"当前检测页面 {detected} 与 active_page {active} 不一致，请先重新采集或确认当前页面状态后再录制。")
         root_json = load_json(config.output_dir / "current_ui_tree.json")
         annotate(root_json)
         from_page = str(current["active_page"])
@@ -363,13 +403,13 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
         return {**current, "needs_manual_label": True, "hit_node": hit, "message": "命中控件缺少稳定 key/text，请手动填写描述后再保存。"}
     if expect:
         target["expect"] = expect
-    ctype = str(target.get("component_type") or hit.get("component_type") if hit else "")
+    ctype = str(hit.get("component_type") if hit else "")
     if ctype in {"Toggle", "Switch", "CheckBox", "Checkbox"}:
         target["expect"] = "same_page"
-    execute_tap(config.device_id, [int(x), int(y)])
+    execute_device_input(config.device_id, "tap", [int(x), int(y)])
     time.sleep(1.2)
     after_capture = capture_state_without_graph_write()
-    graph = load_navigation_graph(config.work_dir)
+    graph = config.graphs.load()
     from_state = graph.get("states", {}).get(
         from_page,
         current.get("active_state") or current.get("state") or {"page_name": from_page},
@@ -383,33 +423,35 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
         after_capture["state"] = contextualize_child_state(
             graph, from_page, after_capture["state"], target
         )
-    after = state_response_from_capture(
-        after_capture["root"],
-        after_capture["state"],
-        graph,
-        from_page,
-    )
+    after = read_current_state(snapshot=after_capture, graph=graph, active_page=from_page)
     to_page = after["state"]["page_name"]
     if same_page:
         if ctype in {"Toggle", "Switch", "CheckBox", "Checkbox"}:
             upsert_clicked_target_as_candidate(graph, from_page, target)
-            save_navigation_graph(graph, config.work_dir)
+            config.graphs.save(graph)
             refreshed = read_current_state(capture=False)
             return {**refreshed, "message": "点击后仍停留在当前页面。如该操作用于展开或刷新页面内容，请使用‘录制页面内变化’模式。"}
         steps = list(chain.get("steps", [])) if chain else []
-        steps.append(transition_step(target))
-        save_pending_action_chain(config.work_dir, {
+        steps.append({"operate": "tap", "target": step_target(target)})
+        save_json({
             "from_page": from_page,
             "steps": steps,
             "created_at": chain.get("created_at") if chain else now_iso(),
             "updated_at": now_iso(),
-        })
+        }, config.work_dir / "outputs" / "navigation" / "pending_action_chain.json", "未完成多步骤跳转")
         message = f"已记录第 {len(steps)} 步，继续点击临时菜单/弹层中的目标控件；进入新页面后会保存为一条多步骤跳转。"
-        return state_response_from_capture(after_capture["root"], after_capture["state"], graph, from_page, message=message)
+        return read_current_state(
+            snapshot=after_capture,
+            graph=graph,
+            active_page=from_page,
+            message=message,
+        )
 
     steps = list(chain.get("steps", [])) if chain else []
-    steps.append(transition_step(target))
-    tid = transition_id_for_steps(from_page, str(to_page), steps, effect)
+    steps.append({"operate": "tap", "target": step_target(target)})
+    id_payload = {"from_page": from_page, "to_page": str(to_page), "steps": steps, "effect": effect}
+    digest = hashlib.sha1(json.dumps(id_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    tid = f"{from_page}__to__{to_page}__steps_{digest}"
     transition = {
         "transition_id": tid,
         "from_page": from_page,
@@ -421,10 +463,10 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
     if effect:
         transition["effect"] = effect
     graph.setdefault("states", {})[after["state"]["page_name"]] = after["state"]
-    add_transition(graph, transition)
+    NavigationGraph(graph).add_transition(transition)
     if steps:
         upsert_clicked_target_as_candidate(graph, from_page, steps[0].get("target") or target, transition_id=tid)
-    save_navigation_graph(graph, config.work_dir)
+    config.graphs.save(graph)
     save_current_path_session(config.work_dir, to_page)
     clear_pending_action_chain(config.work_dir)
     return read_current_state(capture=False)
@@ -435,28 +477,131 @@ def index() -> FileResponse:
     return FileResponse(APP_DIR / "templates" / "nav.html")
 
 
-@app.post("/api/capture")
-def api_capture() -> JSONResponse:
-    return ok_response(**read_current_state(capture=True))
-
-
 @app.post("/api/console_action")
-def api_console_action(req: ConsoleActionRequest) -> JSONResponse:
+def api_console_action(req: ActionRequest) -> JSONResponse:
     action = req.action.strip()
     payload = req.payload or {}
     if action == "capture_current":
-        return api_capture()
+        return ok_response(**read_current_state(capture=True))
     if action == "system_back":
-        return api_back()
+        graph = config.graphs.load()
+        active_page = current_session_page(config.work_dir)
+        active_state = graph.get("states", {}).get(active_page, {})
+        parent_page = str(active_state.get("parent_page") or active_state.get("base_page") or "")
+        if not parent_page and active_page:
+            incoming_pages = list(dict.fromkeys(
+                str(transition.get("from_page") or "")
+                for transition in graph.get("transitions", [])
+                if transition.get("to_page") == active_page and transition.get("from_page") != active_page
+            ))
+            incoming_pages = [page for page in incoming_pages if page]
+            if len(incoming_pages) == 1:
+                parent_page = incoming_pages[0]
+        execute_device_input(config.device_id, "back")
+        time.sleep(1.0)
+        current = read_current_state(capture=True, preferred_page=parent_page)
+        resolved_page = str(current.get("active_page") or current.get("state", {}).get("page_name") or "")
+        if resolved_page:
+            save_current_path_session(config.work_dir, resolved_page)
+        return ok_response(**current)
     if action == "clear_pending":
-        clear_pending_files()
+        pending_path = pending_transition_path(config.work_dir)
+        if pending_path.exists():
+            pending_path.unlink()
+        clear_pending_action_chain(config.work_dir)
         return ok_response(**read_current_state(capture=False), message="已清空待确认跳转。")
+    if action == "reorder_children":
+        parent_page = str(payload.get("parent_page") or "")
+        ordered_transition_ids = payload.get("ordered_transition_ids")
+        if not isinstance(ordered_transition_ids, list):
+            raise ValueError("ordered_transition_ids 必须是数组")
+        graph = config.graphs.load()
+        persisted_order = NavigationGraph(graph).reorder_children(
+            parent_page, ordered_transition_ids,
+        )
+        config.graphs.save(graph)
+        return ok_response(
+            parent_page=parent_page,
+            ordered_transition_ids=persisted_order,
+            message=f"已保存 {parent_page} 的页面顺序，重新生成 DFS 时自动生效。",
+        )
     if action == "continue_current_page":
-        return api_continue_current_page()
+        current = read_current_state(capture=True)
+        graph = config.graphs.load()
+        page_name = current.get("active_page") or current["state"]["page_name"]
+        state = graph.setdefault("states", {}).setdefault(page_name, current["state"])
+        captures = state.setdefault("continued_captures", [])
+        capture_id = f"{page_name}__continue_{len(captures) + 1:03d}"
+        capture_dir = config.work_dir / "outputs" / "navigation" / "continued_captures"
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        screenshot = capture_dir / f"{capture_id}.png"
+        if (source := config.output_dir / "current_screen.png").exists():
+            shutil.copy2(source, screenshot)
+        for candidate in current.get("current_candidates", []) or []:
+            item = candidate_from_auto(candidate, source="continued_capture")
+            item["source_capture_id"] = capture_id
+            upsert_candidate(state, item)
+        captures.append({
+            "capture_id": capture_id,
+            "created_at": now_iso(),
+            "screenshot": str(screenshot),
+            "candidate_count": len(current.get("current_candidates", []) or []),
+        })
+        config.graphs.save(graph)
+        return ok_response(**read_current_state(capture=False), message=f"已续录当前页面：{capture_id}")
     if action == "swipe_horizontal":
-        return api_swipe_horizontal(SwipeHorizontalRequest(direction=str(payload.get("direction") or "")))
-    if action == "navigate_to_page":
-        return api_navigate_to_page(NavigateToPageRequest(page_name=str(payload.get("page_name") or "")))
+        direction = str(payload.get("direction") or "").lower()
+        if direction not in {"left", "right"}:
+            raise ValueError("direction 必须是 left 或 right")
+        current = read_current_state(capture=False)
+        execute_device_input(
+            config.device_id,
+            f"horizontal_{direction}",
+            metrics=current.get("screen_metrics", {}),
+        )
+        graph = config.graphs.load()
+        active_page = str(current["active_page"])
+        base_page = str(current["active_state"].get("base_page") or active_page)
+        prefix = f"{base_page}__view_h"
+        indexes = [
+            int(str(name).removeprefix(prefix))
+            for name in graph.get("states", {})
+            if str(name).startswith(prefix) and str(name).removeprefix(prefix).isdigit()
+        ]
+        page_name = f"{prefix}{max(indexes, default=0) + 1}"
+        view_state = {
+            "page_name": page_name,
+            "page_description": f"{base_page} 横向视图 {max(indexes, default=0) + 1}",
+            "base_page": base_page,
+            "state_type": "local_view",
+            "effect": "local_horizontal_view_changed",
+        }
+        operate = "swipe_left" if direction == "left" else "swipe_right"
+        description = f"横向{'左' if direction == 'left' else '右'}滑"
+        target = {"type": "gesture", "value": f"swipe_{direction}", "key_description": description, "step_prompt": description, "axis": "horizontal"}
+        effect = "local_horizontal_view_changed"
+        id_payload = {
+            "from_page": active_page,
+            "operate": operate,
+            "to_page": page_name,
+            "target": {key: target[key] for key in ("type", "value", "key", "component_type", "key_description", "step_prompt") if target.get(key)},
+            "effect": effect,
+        }
+        tid = f"{active_page}__to__{page_name}__{operate}_{hashlib.sha1(json.dumps(id_payload, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()[:12]}"
+        graph.setdefault("states", {})[page_name] = view_state
+        NavigationGraph(graph).add_transition({
+            "transition_id": tid,
+            "from_page": active_page,
+            "to_page": page_name,
+            "operate": operate,
+            "target": target,
+            "effect": effect,
+            "base_page": base_page,
+        })
+        config.graphs.save(graph)
+        save_current_path_session(config.work_dir, page_name, base_page)
+        time.sleep(1.0)
+        return ok_response(**read_current_state(capture=True))
     raise ValueError(f"未知控制台动作：{action}")
 
 
@@ -465,71 +610,69 @@ def api_state() -> JSONResponse:
     return ok_response(**read_current_state(capture=False))
 
 
-@app.post("/api/tap_point")
-def api_tap_point(req: TapPointRequest) -> JSONResponse:
-    return ok_response(**record_tap_at_point(req.x, req.y, expect=req.expect, effect=req.effect, manual_label=req.manual_label))
-
-
-@app.post("/api/tap_same_page_operation")
-def api_tap_same_page_operation(req: PointRequest) -> JSONResponse:
-    return operation_response(record_same_page_operation(req.x, req.y, manual_label=req.manual_label))
-
-
-@app.post("/api/page_gesture_operation")
-def api_page_gesture_operation(req: PageGestureOperationRequest) -> JSONResponse:
-    return operation_response(record_page_gesture_operation(req.x, req.y, req.operate, effect=req.effect, manual_label=req.manual_label))
-
-
-def operation_response(data: Dict[str, Any]) -> JSONResponse:
-    return JSONResponse(data) if data.get("ok") is False else ok_response(**data)
-
-
-def record_candidate(index: int, expect: str, effect: str, manual_label: str) -> Dict[str, Any]:
-    candidates = read_current_state(capture=True)["candidates"]
-    if index < 1 or index > len(candidates):
-        raise ValueError(f"候选编号无效：{index}")
-    center = candidates[index - 1].get("bounds_center")
-    if not isinstance(center, list) or len(center) != 2:
-        raise ValueError("候选项缺少 bounds_center，无法作为临时 hit-test 输入")
-    return record_tap_at_point(int(center[0]), int(center[1]), expect=expect, effect=effect, manual_label=manual_label)
-
-
 @app.post("/api/record_action")
-def api_record_action(req: RecordActionRequest) -> JSONResponse:
+def api_record_action(req: ActionRequest) -> JSONResponse:
     action = req.action.strip()
     payload = req.payload or {}
     label = str(payload.get("manual_label") or "")
     if action == "tap_candidate":
-        return ok_response(**record_candidate(int(payload.get("index")), str(payload.get("expect") or "new_page"), str(payload.get("effect") or ""), label))
+        candidates = read_current_state(capture=True)["candidates"]
+        index = int(payload.get("index"))
+        if index < 1 or index > len(candidates):
+            raise ValueError(f"候选编号无效：{index}")
+        center = candidates[index - 1].get("bounds_center")
+        if not isinstance(center, list) or len(center) != 2:
+            raise ValueError("候选项缺少 bounds_center，无法作为临时 hit-test 输入")
+        return ok_response(**record_tap_at_point(
+            int(center[0]),
+            int(center[1]),
+            expect=str(payload.get("expect") or "new_page"),
+            effect=str(payload.get("effect") or ""),
+            manual_label=label,
+        ))
     if action not in {"tap_point", "same_page_tap", "popup_tap", "same_page_gesture"}:
         raise ValueError(f"未知录制动作：{action}")
     x, y = int(payload.get("x")), int(payload.get("y"))
     if action == "tap_point":
         data = record_tap_at_point(x, y, expect=str(payload.get("expect") or "new_page"), effect=str(payload.get("effect") or ""), manual_label=label)
     elif action == "same_page_tap":
-        data = record_same_page_operation(x, y, manual_label=label)
+        data = record_page_operation(x, y, mode="same_page", manual_label=label)
     elif action == "popup_tap":
-        data = record_popup_operation(x, y, manual_label=label)
+        data = record_page_operation(
+            x,
+            y,
+            mode="popup",
+            manual_label=label,
+            popup_type=str(payload.get("popup_type") or ""),
+        )
     elif action == "same_page_gesture":
-        data = record_page_gesture_operation(x, y, str(payload.get("operate") or ""), effect=str(payload.get("effect") or ""), manual_label=label)
-    return operation_response(data)
-
-
-@app.post("/api/tap_candidate")
-def api_tap_candidate(req: TapCandidateRequest) -> JSONResponse:
-    return ok_response(**record_candidate(req.index, req.expect, req.effect, req.manual_label))
+        data = record_page_operation(
+            x,
+            y,
+            mode="gesture",
+            operate=str(payload.get("operate") or ""),
+            effect=str(payload.get("effect") or ""),
+            manual_label=label,
+        )
+    return JSONResponse(data) if data.get("ok") is False else ok_response(**data)
 
 
 @app.get("/api/page_directory")
 def api_page_directory() -> JSONResponse:
-    return ok_response(**build_page_directory(load_navigation_graph(config.work_dir)))
+    return ok_response(**build_page_directory(config.graphs.load()))
 
 
 @app.post("/api/rename_page")
 def api_rename_page(req: RenamePageRequest) -> JSONResponse:
     old_name = req.old_page_name.strip()
-    new_name = validate_page_name_for_rename(req.new_page_name)
-    graph = load_navigation_graph(config.work_dir)
+    new_name = req.new_page_name.strip()
+    if not new_name:
+        raise ValueError("page_name 不能为空")
+    if not new_name.startswith("Pages_"):
+        raise ValueError("page_name 必须以 Pages_ 开头，例如 Pages_WLAN")
+    if any(ch in new_name for ch in ["/", "\\", "\n", "\r", "\t"]):
+        raise ValueError("page_name 不能包含路径分隔符或换行符")
+    graph = config.graphs.load()
     states = graph.setdefault("states", {})
     if old_name not in states:
         raise ValueError(f"页面不存在：{old_name}")
@@ -538,50 +681,33 @@ def api_rename_page(req: RenamePageRequest) -> JSONResponse:
     if new_name != old_name and new_name in states:
         raise ValueError(f"目标 page_name 已存在：{new_name}")
 
-    backup = backup_graph_file()
-    state = states.pop(old_name)
-    state["page_name"] = new_name
-    if req.new_title.strip():
-        state["last_title"] = req.new_title.strip()
-        state["page_description"] = f"{'弹窗：' if state.get('is_overlay') else ''}{req.new_title.strip()}"
-    states[new_name] = state
-    if new_name != old_name:
-        rename_page_references(graph, old_name, new_name)
-    save_navigation_graph(graph, config.work_dir)
-    rename_session_references(old_name, new_name)
+    backup = config.graphs.backup()
+    state = NavigationGraph(graph).rename_page(
+        old_name,
+        new_name,
+        new_title=req.new_title,
+    )
+    config.graphs.save(graph)
+    migrated_files = (
+        config.graphs.rename_runtime_references(old_name, new_name)
+        if new_name != old_name else []
+    )
     return ok_response(
         page_name=new_name, old_page_name=old_name,
         new_title=state.get("last_title") or state.get("page_description") or new_name,
-        backup=backup, message=f"已重命名页面：{old_name} -> {new_name}",
+        backup=backup, migrated_files=migrated_files,
+        message=f"已重命名页面：{old_name} -> {new_name}",
     )
-
-
-def rename_session_references(old_name: str, new_name: str) -> None:
-    path = config.work_dir / "outputs" / "navigation" / "current_path_session.json"
-    if not path.exists():
-        return
-    try:
-        session = load_json(path)
-    except Exception:
-        return
-    changed = False
-    for field in ("active_page", "base_page"):
-        if session.get(field) == old_name:
-            session[field], changed = new_name, True
-    if changed:
-        save_json(session, path, "当前页面会话")
-
 
 @app.get("/api/page_detail")
 def api_page_detail(page_name: str) -> JSONResponse:
-    graph = load_navigation_graph(config.work_dir)
+    graph = config.graphs.load()
     state = graph.get("states", {}).get(page_name)
     if not isinstance(state, dict):
         raise ValueError(f"页面不存在：{page_name}")
     transitions = graph.get("transitions", [])
     return ok_response(
         page_name=page_name, state=state,
-        path_from_root=[] if page_name == "Pages_root" else (bfs_path(graph, page_name) or []),
         incoming_transitions=[item for item in transitions if item.get("to_page") == page_name],
         outgoing_transitions=[item for item in transitions if item.get("from_page") == page_name],
         merged_candidates=get_page_merged_candidates(graph, page_name, []),
@@ -591,280 +717,50 @@ def api_page_detail(page_name: str) -> JSONResponse:
     )
 
 
-@app.post("/api/set_active_page")
-def api_set_active_page(req: SetActivePageRequest) -> JSONResponse:
-    if req.page_name not in load_navigation_graph(config.work_dir).get("states", {}):
-        raise ValueError(f"页面不存在：{req.page_name}")
-    save_current_path_session(config.work_dir, req.page_name)
-    return ok_response(**read_current_state(capture=False))
-
-
-@app.post("/api/continue_current_page")
-def api_continue_current_page() -> JSONResponse:
-    current = read_current_state(capture=True)
-    graph = load_navigation_graph(config.work_dir)
-    page_name = current.get("active_page") or current["state"]["page_name"]
-    state = graph.setdefault("states", {}).setdefault(page_name, current["state"])
-    captures = state.setdefault("continued_captures", [])
-    capture_id = f"{page_name}__continue_{len(captures) + 1:03d}"
-    capture_dir = config.work_dir / "outputs" / "navigation" / "continued_captures"
-    capture_dir.mkdir(parents=True, exist_ok=True)
-    screenshot = capture_dir / f"{capture_id}.png"
-    if (source := config.output_dir / "current_screen.png").exists():
-        shutil.copy2(source, screenshot)
-    for candidate in current.get("current_candidates", []) or []:
-        item = candidate_from_auto(candidate, source="continued_capture")
-        item["source_capture_id"] = capture_id
-        upsert_candidate(state, item)
-    captures.append({"capture_id": capture_id, "created_at": now_iso(), "screenshot": str(screenshot), "candidate_count": len(current.get("current_candidates", []) or [])})
-    save_navigation_graph(graph, config.work_dir)
-    return ok_response(**read_current_state(capture=False), message=f"已续录当前页面：{capture_id}")
-
-
-@app.post("/api/navigate_to_page")
-def api_navigate_to_page(req: NavigateToPageRequest) -> JSONResponse:
-    graph = load_navigation_graph(config.work_dir)
-    path = bfs_path(graph, req.page_name)
-    if path is None:
-        raise ValueError(f"找不到 Pages_root 到 {req.page_name} 的路径")
-    for transition in path:
-        from_page = str(transition.get("from_page") or "")
-        for step in transition_steps(transition):
-            before = capture_state_without_graph_write(ui_tree_only=True)
-            before["state"] = resolve_detected_state(graph, before["state"], from_page)
-            detected_page = str(before["state"].get("page_name") or "")
-            if from_page and not state_matches_graph_page(graph, before["state"], from_page):
-                raise ValueError(f"无法进入 {req.page_name}：当前检测页面是 {detected_page}，但路径下一步要求位于 {from_page}。请先回到正确起始页。")
-            center = find_candidate_center_for_target(before["root"], step.get("target") or {})
-            if not center:
-                raise ValueError(f"无法进入 {req.page_name}：当前页面找不到路径控件「{transition_steps_label([step])}」。请确认该控件仍存在或重新录制这条路径。")
-            execute_tap(config.device_id, center)
-            time.sleep(0.5)
-    captured = capture_state_without_graph_write(ui_tree_only=True)
-    captured["state"] = resolve_detected_state(graph, captured["state"], req.page_name)
-    if not state_matches_graph_page(graph, captured["state"], req.page_name):
-        raise ValueError(f"无法进入 {req.page_name}：最终校验失败，实际位于 {captured['state'].get('page_name')}")
-    save_current_path_session(config.work_dir, req.page_name)
-    return ok_response(**state_response_from_capture(
-        captured["root"], captured["state"], graph, req.page_name,
-        message="已按导航图快速跳转：仅拉取 UI 树并解析控件，未重新截图。",
-    ))
-
-
-def backup_graph_file() -> str:
-    src = navigation_graph_path(config.work_dir)
-    backup_dir = config.work_dir / "outputs" / "navigation" / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    dst = backup_dir / f"settings_navigation_graph_{int(time.time())}.json"
-    if src.exists():
-        shutil.copy2(src, dst)
-    return str(dst)
-
-
-def finalize_delete(action: str, graph: Dict[str, Any], plan: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
-    if dry_run:
-        return {"dry_run": True, "delete_plan": plan}
-    backup = backup_graph_file()
-    apply_delete_plan(graph, plan)
-    prune = prune_graph_after_delete(graph, config.work_dir)
-    plan.setdefault("warnings", []).extend(prune.get("warnings", []))
-    save_navigation_graph(graph, config.work_dir)
-    append_web_history(config.work_dir, {"operation_id": f"{action}_{int(time.time())}", "action": action, "delete_plan": plan, "graph_backup": backup})
-    return {"dry_run": False, "delete_plan": plan, "graph_backup": backup}
+@app.get("/api/orphan_pages")
+def api_orphan_pages() -> JSONResponse:
+    maintenance = GraphMaintenance(config.graphs.load())
+    pages = maintenance.orphan_pages(current_session_page(config.work_dir))
+    return ok_response(orphan_pages=pages, count=len(pages))
 
 
 @app.post("/api/delete_action")
 def api_delete_action(req: DeleteActionRequest) -> JSONResponse:
     target_type = req.target_type.strip()
-    payload = dict(req.payload or {})
-    payload["dry_run"] = bool(req.dry_run)
-    handlers = {
-        "transition": (api_delete_transition, DeleteTransitionRequest),
-        "branch": (api_delete_branch, DeleteBranchRequest),
-        "page": (api_delete_page, DeletePageRequest),
-        "candidate": (api_delete_candidate, DeleteCandidateRequest),
-        "page_operation": (api_delete_page_operation, DeletePageOperationRequest),
-        "continued_capture": (api_delete_continued_capture, DeleteContinuedCaptureRequest),
-    }
-    if target_type not in handlers:
-        raise ValueError(f"未知删除目标类型：{target_type}")
-    handler, model = handlers[target_type]
-    return handler(model(**payload))
+    graph = config.graphs.load()
+    maintenance = GraphMaintenance(graph)
+    plan = maintenance.plan_delete(target_type, dict(req.payload or {}))
+    preview_token = hashlib.sha256(
+        f"{target_type}\n{json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}".encode("utf-8")
+    ).hexdigest()
+    if req.dry_run:
+        return ok_response(dry_run=True, delete_plan=plan, preview_token=preview_token)
+    if not req.preview_token or not hmac.compare_digest(req.preview_token, preview_token):
+        raise ValueError("删除计划已变化或缺少预览确认，请重新预览后再执行。")
 
-
-@app.post("/api/delete_transition")
-def api_delete_transition(req: DeleteTransitionRequest) -> JSONResponse:
-    return delete_transition_response(req.transition_id, req.delete_orphan_to_state, req.dry_run, "delete_transition")
-
-
-@app.post("/api/delete_branch")
-def api_delete_branch(req: DeleteBranchRequest) -> JSONResponse:
-    return delete_transition_response(req.transition_id, req.delete_descendants, req.dry_run, "delete_branch")
-
-
-def delete_transition_response(transition_id_value: str, descendants: bool, dry_run: bool, action: str) -> JSONResponse:
-    graph = load_navigation_graph(config.work_dir)
-    plan = plan_delete_transition(graph, transition_id_value, descendants)
-    return ok_response(**finalize_delete(action, graph, plan, dry_run))
-
-
-@app.post("/api/delete_page")
-def api_delete_page(req: DeletePageRequest) -> JSONResponse:
-    if req.page_name == "Pages_root":
-        raise ValueError("不允许删除 Pages_root")
-    graph = load_navigation_graph(config.work_dir)
-    plan = blank_delete_plan()
-    plan["states"].append(req.page_name)
-    plan["transitions"] = [item for item in graph.get("transitions", []) if
-        (req.delete_incoming and item.get("to_page") == req.page_name) or
-        (req.delete_outgoing and item.get("from_page") == req.page_name)]
-    state = graph.get("states", {}).get(req.page_name, {})
-    plan["page_operations"] = [{"page_name": req.page_name, "operation_id": item["operation_id"]} for item in state.get("page_operations", []) if item.get("operation_id")]
-    plan["continued_captures"] = [{"page_name": req.page_name, "capture_id": item["capture_id"]} for item in state.get("continued_captures", []) if item.get("capture_id")]
-    result = finalize_delete("delete_page", graph, plan, req.dry_run)
-    if not req.dry_run:
-        save_current_path_session(config.work_dir, "Pages_root")
-    return ok_response(**result)
-
-
-@app.post("/api/delete_candidate")
-def api_delete_candidate(req: DeleteCandidateRequest) -> JSONResponse:
-    graph = load_navigation_graph(config.work_dir)
-    state = graph.get("states", {}).get(req.page_name, {})
-    candidates = state.get("merged_candidates", []) or []
-    candidate = next((item for item in candidates if candidate_id(item) == req.candidate_id), None)
-    if not candidate:
-        raise ValueError(f"候选不存在：{req.candidate_id}")
-    plan = blank_delete_plan()
-    plan["candidates"].append({"page_name": req.page_name, "candidate_id": req.candidate_id, "action": "delete_candidate"})
-    if candidate.get("transition_ids") and not req.delete_linked_transitions:
-        plan["warnings"].append("该候选控件关联了已录制跳转，只删除候选可能造成 transition 缺少控件引用。")
-    if req.delete_linked_transitions:
-        for transition_id_value in candidate.get("transition_ids", []) or []:
-            subplan = plan_delete_transition(graph, transition_id_value, True)
-            plan["transitions"].extend(subplan["transitions"])
-            plan["states"].extend(page for page in subplan["states"] if page not in plan["states"])
-    if req.delete_linked_operations:
-        plan["page_operations"].extend({"page_name": req.page_name, "operation_id": operation_id} for operation_id in candidate.get("operation_ids", []) or [])
-    if not req.dry_run:
-        state["merged_candidates"] = [item for item in candidates if candidate_id(item) != req.candidate_id]
-    return ok_response(**finalize_delete("delete_candidate", graph, plan, req.dry_run))
-
-
-@app.post("/api/delete_page_operation")
-def api_delete_page_operation(req: DeletePageOperationRequest) -> JSONResponse:
-    graph = load_navigation_graph(config.work_dir)
-    plan = blank_delete_plan()
-    plan["page_operations"].append({"page_name": req.page_name, "operation_id": req.operation_id})
-    for candidate in graph.get("states", {}).get(req.page_name, {}).get("merged_candidates", []) or []:
-        references = {candidate.get("requires_operation_id"), candidate.get("source_operation_id"), *(candidate.get("operation_ids") or [])}
-        if req.operation_id in references:
-            plan["candidates"].append({"page_name": req.page_name, "candidate_id": candidate_id(candidate), "action": "delete_revealed" if req.delete_revealed_candidates else "remove_operation_ref"})
-    if not req.delete_revealed_candidates:
-        plan["keep_revealed_candidates"] = True
-    return ok_response(**finalize_delete("delete_page_operation", graph, plan, req.dry_run))
-
-
-@app.post("/api/delete_continued_capture")
-def api_delete_continued_capture(req: DeleteContinuedCaptureRequest) -> JSONResponse:
-    graph = load_navigation_graph(config.work_dir)
-    plan = blank_delete_plan()
-    state = graph.get("states", {}).get(req.page_name, {})
-    capture = next((item for item in state.get("continued_captures", []) or [] if item.get("capture_id") == req.capture_id), None)
-    if not capture:
-        raise ValueError(f"续录不存在：{req.capture_id}")
-    plan["continued_captures"].append({"page_name": req.page_name, "capture_id": req.capture_id})
-    if capture.get("screenshot"):
-        plan["files"].append(capture["screenshot"])
-    for candidate in state.get("merged_candidates", []) or []:
-        if candidate.get("source_capture_id") != req.capture_id:
-            continue
-        if (candidate.get("transition_ids") or candidate.get("operation_ids")) and req.delete_candidates_from_capture:
-            plan["warnings"].append(f"候选 {candidate_id(candidate)} 有关联记录，将只移除 source_capture_id")
-        plan["candidates"].append({"page_name": req.page_name, "candidate_id": candidate_id(candidate), "action": "delete_from_capture"})
-    if not req.delete_candidates_from_capture:
-        plan["keep_capture_candidates"] = True
-    return ok_response(**finalize_delete("delete_continued_capture", graph, plan, req.dry_run))
-
-
-@app.post("/api/swipe_horizontal")
-def api_swipe_horizontal(req: SwipeHorizontalRequest) -> JSONResponse:
-    current = read_current_state(capture=False)
-    direction = req.direction.lower()
-    execute_horizontal_swipe(config.device_id, direction, current.get("screen_metrics", {}))
-    graph = load_navigation_graph(config.work_dir)
-    active_page = current["active_page"]
-    operate = "swipe_left" if direction == "left" else "swipe_right"
-    target = horizontal_target(direction)
-    view_state = next_horizontal_view_state(graph, str(current["active_state"].get("base_page") or active_page))
-    graph.setdefault("states", {})[view_state["page_name"]] = view_state
-    effect = "local_horizontal_view_changed"
-    add_transition(graph, {
-        "transition_id": transition_id(active_page, operate, view_state["page_name"], target, effect),
-        "from_page": active_page, "to_page": view_state["page_name"], "operate": operate,
-        "target": target, "effect": effect, "base_page": view_state["base_page"],
+    backup = config.graphs.backup()
+    runtime_warnings = maintenance.apply_delete(plan)
+    config.graphs.save(maintenance.graph)
+    append_web_history(config.work_dir, {
+        "operation_id": f"{target_type}_{int(time.time())}",
+        "action": target_type,
+        "delete_plan": plan,
+        "graph_backup": backup,
     })
-    save_navigation_graph(graph, config.work_dir)
-    save_current_path_session(config.work_dir, view_state["page_name"], view_state["base_page"])
-    time.sleep(1.0)
-    return ok_response(**read_current_state(capture=True))
-
-
-@app.post("/api/back")
-def api_back() -> JSONResponse:
-    graph = load_navigation_graph(config.work_dir)
-    active_page = current_session_page(config.work_dir)
-    active_state = graph.get("states", {}).get(active_page, {})
-    parent_page = str(
-        active_state.get("parent_page")
-        or active_state.get("base_page")
-        or ""
+    if current_session_page(config.work_dir) in set(plan.get("states", [])):
+        save_current_path_session(config.work_dir, "Pages_root")
+    return ok_response(
+        dry_run=False,
+        delete_plan=plan,
+        graph_backup=backup,
+        preview_token=preview_token,
+        runtime_warnings=runtime_warnings,
     )
-
-    if not parent_page and active_page:
-        incoming_pages = list(dict.fromkeys(
-            str(transition.get("from_page") or "")
-            for transition in graph.get("transitions", [])
-            if transition.get("to_page") == active_page
-            and transition.get("from_page") != active_page
-        ))
-        incoming_pages = [page for page in incoming_pages if page]
-        if len(incoming_pages) == 1:
-            parent_page = incoming_pages[0]
-
-    execute_back(config.device_id)
-    time.sleep(1.0)
-    current = read_current_state(
-        capture=True,
-        preferred_page=parent_page,
-    )
-    resolved_page = str(
-        current.get("active_page")
-        or current.get("state", {}).get("page_name")
-        or ""
-    )
-    if resolved_page:
-        save_current_path_session(config.work_dir, resolved_page)
-    return ok_response(**current)
-
-
-def clear_pending_files() -> None:
-    path = pending_transition_path(config.work_dir)
-    if path.exists():
-        path.unlink()
-    clear_pending_action_chain(config.work_dir)
-
-
-@app.post("/api/clear_pending")
-def api_clear_pending() -> JSONResponse:
-    clear_pending_files()
-    return ok_response(pending=None, pending_action_chain=None)
 
 
 @app.get("/api/graph")
 def api_graph() -> JSONResponse:
-    path = navigation_graph_path(config.work_dir)
-    return JSONResponse(load_json(path) if path.exists() else load_navigation_graph(config.work_dir))
+    return JSONResponse(config.graphs.load())
 
 
 @app.get("/screen")
@@ -874,21 +770,16 @@ def screen() -> FileResponse:
     return FileResponse(path, media_type="image/png", headers=headers)
 
 
-def parse_args() -> argparse.Namespace:
+def main() -> None:
+    global config
     parser = argparse.ArgumentParser(description="设置导航录制 Web 控制台")
     parser.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR)
     parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    config.work_dir = args.work_dir
-    config.device_id = args.device_id
-    config.output_dir = args.output_dir or (args.work_dir / "outputs" / "latest")
+    args = parser.parse_args()
+    config = ServerConfig(args.work_dir, args.device_id, args.output_dir)
     app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
     uvicorn.run(app, host=args.host, port=args.port)
 

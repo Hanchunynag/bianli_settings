@@ -1,38 +1,51 @@
 import { el } from './dom.js';
 import { store } from './state.js';
 
-export function setBusy(value) {
-  store.busy = value;
-  el('loading').classList.toggle('hidden', !value);
-  document.querySelectorAll('button').forEach((button) => {
-    button.disabled = value;
-  });
+function readableError(data, response) {
+  if (typeof data?.error === 'string') return data.error;
+  if (typeof data?.detail === 'string') return data.detail;
+  if (Array.isArray(data?.detail)) {
+    return data.detail.map((item) => item.msg || JSON.stringify(item)).join('；');
+  }
+  return `请求失败（HTTP ${response.status}）`;
 }
 
-export function showError(message) {
-  el('error').textContent = message || '';
-  el('error').classList.toggle('hidden', !message);
-}
-
-export async function requestJson(path, options = {}) {
-  const res = await fetch(path, options);
-  return res.json();
-}
-
-export async function api(path, options = {}) {
-  if (store.busy) return null;
-  setBusy(true);
-  showError('');
+async function requestJson(path, options = {}, blocking = true) {
+  if (blocking && store.busy) return null;
+  if (blocking) {
+    store.busy = true;
+    el('loading').classList.remove('hidden');
+    document.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+  }
+  const errorBox = el('error');
   try {
-    const data = await requestJson(path, options);
-    if (!data.ok && data.error) throw new Error(data.error);
+    const response = await fetch(path, options);
+    const data = await response.json();
+    if (!response.ok || data?.ok === false) {
+      throw new Error(readableError(data, response));
+    }
+    errorBox.textContent = '';
+    errorBox.classList.add('hidden');
     return data;
   } catch (err) {
-    showError(err.message || String(err));
+    errorBox.textContent = err.message || String(err);
+    errorBox.classList.remove('hidden');
     return null;
   } finally {
-    setBusy(false);
+    if (blocking) {
+      store.busy = false;
+      el('loading').classList.add('hidden');
+      document.querySelectorAll('button').forEach((button) => { button.disabled = false; });
+    }
   }
+}
+
+export function api(path, options = {}) {
+  return requestJson(path, options, true);
+}
+
+export function queryJson(path, options = {}) {
+  return requestJson(path, options, false);
 }
 
 export function postJson(path, body = {}) {

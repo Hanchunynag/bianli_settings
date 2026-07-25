@@ -8,16 +8,3 @@ export function escapeHtml(text) {
     '"': '&quot;',
   }[ch]));
 }
-
-export function actionButton(label, onClick, className = '') {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = label;
-  if (className) button.className = className;
-  button.addEventListener('click', onClick);
-  return button;
-}
-
-export function clear(node) {
-  node.replaceChildren();
-}
