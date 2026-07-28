@@ -4,7 +4,7 @@ from DFS import format_dfs_records, format_path_target
 
 
 class DfsLocatorFormatTest(unittest.TestCase):
-    def test_key_locator_has_type_value_and_keeps_readable_text(self):
+    def test_key_locator_only_keeps_compact_fields(self):
         self.assertEqual(
             format_path_target({
                 "key": "wifi_entry",
@@ -17,16 +17,12 @@ class DfsLocatorFormatTest(unittest.TestCase):
             {
                 "type": "key",
                 "value": "wifi_entry",
-                "key": "wifi_entry",
-                "component_type": "Row",
-                "text": "WLAN",
                 "key_description": "WLAN",
                 "step_prompt": "WLAN",
-                "expect": "new_page",
             },
         )
 
-    def test_text_locator_has_type_value_without_empty_key(self):
+    def test_text_locator_only_keeps_compact_fields(self):
         self.assertEqual(
             format_path_target({
                 "text": "安装证书",
@@ -38,41 +34,39 @@ class DfsLocatorFormatTest(unittest.TestCase):
             {
                 "type": "text",
                 "value": "安装证书",
-                "component_type": "MenuItem",
-                "text": "安装证书",
                 "key_description": "安装证书",
                 "step_prompt": "安装证书",
-                "expect": "new_page",
             },
         )
 
-    def test_component_type_can_be_recovered_from_recorded_candidates(self):
-        graph = {
-            "states": {
-                "Pages_root": {
-                    "merged_candidates": [{
-                        "key": "wifi_entry",
-                        "text": "WLAN",
-                        "component_type": "Row",
-                    }],
-                },
-            },
-        }
+    def test_record_output_removes_all_non_contract_fields(self):
         records = [{
-            "page_description": "WLAN",
-            "path_snapshot": [{"key": "wifi_entry", "text": "WLAN"}],
-            "special_operate": [],
+            "package_name": "com.huawei.hmos.settings",
+            "main_page_name": "com.huawei.hmos.settings.MainAbility",
+            "page_description": "应用和元服务_系统应用",
+            "path_snapshot": [{
+                "key": "Setting.Application.ApplicationTab.ApplicationSystemGroup",
+                "text": "系统应用",
+                "component_type": "Row",
+                "key_description": "系统应用",
+                "step_prompt": "系统应用",
+                "expect": "new_page",
+            }],
+            "special_operate": [{"operation_id": "ignored"}],
+            "page_name": "Pages_ignored",
         }]
 
-        formatted = format_dfs_records(records, graph)
-
-        self.assertEqual(formatted[0]["path_snapshot"][0], {
-            "type": "key",
-            "value": "wifi_entry",
-            "key": "wifi_entry",
-            "component_type": "Row",
-            "text": "WLAN",
-        })
+        self.assertEqual(format_dfs_records(records, {}), [{
+            "package_name": "com.huawei.hmos.settings",
+            "main_page_name": "com.huawei.hmos.settings.MainAbility",
+            "page_description": "应用和元服务_系统应用",
+            "path_snapshot": [{
+                "type": "key",
+                "value": "Setting.Application.ApplicationTab.ApplicationSystemGroup",
+                "key_description": "系统应用",
+                "step_prompt": "系统应用",
+            }],
+        }])
 
 
 if __name__ == "__main__":
