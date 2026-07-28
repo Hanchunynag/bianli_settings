@@ -29,6 +29,21 @@ TARGET_FIELDS = (
 )
 
 
+DFS_RECORD_FIELDS = (
+    "package_name",
+    "main_page_name",
+    "page_description",
+    "path_snapshot",
+)
+
+DFS_TARGET_FIELDS = (
+    "type",
+    "value",
+    "key_description",
+    "step_prompt",
+)
+
+
 def safe_priority(value: Any, default: int = 1000) -> int:
     """Malformed legacy priority must not make the whole export fail."""
     try:
@@ -38,7 +53,7 @@ def safe_priority(value: Any, default: int = 1000) -> int:
 
 
 def compact_target(target: Any) -> Target:
-    """Keep only stable semantic fields required to locate a target later."""
+    """Keep semantic target fields needed while traversing the graph."""
     if not isinstance(target, dict):
         return {}
     return {
@@ -48,47 +63,12 @@ def compact_target(target: Any) -> Target:
     }
 
 
-def _candidate_component_type_indexes(graph: Graph) -> tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
-    """Index recorded candidate component types by stable key and visible text."""
-    by_key: Dict[str, Set[str]] = {}
-    by_text: Dict[str, Set[str]] = {}
-    states = graph.get("states") or {}
-    if not isinstance(states, dict):
-        return by_key, by_text
+def format_path_target(target: Any) -> Target:
+    """Convert a path step to the strict compact DFS locator schema.
 
-    for state in states.values():
-        if not isinstance(state, dict):
-            continue
-        for candidate in state.get("merged_candidates") or []:
-            if not isinstance(candidate, dict):
-                continue
-            component_type = str(candidate.get("component_type") or "").strip()
-            if not component_type:
-                continue
-            key = str(candidate.get("key") or "").strip()
-            text = str(candidate.get("text") or "").strip()
-            if key:
-                by_key.setdefault(key, set()).add(component_type)
-            if text:
-                by_text.setdefault(text, set()).add(component_type)
-    return by_key, by_text
-
-
-def _unique_component_type(values: Optional[Set[str]]) -> str:
-    """Return a component type only when the candidate identity is unambiguous."""
-    return next(iter(values)) if values and len(values) == 1 else ""
-
-
-def format_path_target(
-    target: Any,
-    component_types_by_key: Optional[Dict[str, Set[str]]] = None,
-    component_types_by_text: Optional[Dict[str, Set[str]]] = None,
-) -> Target:
-    """Convert a navigation target to the explicit locator schema used by DFS JSON.
-
-    Stable keys take precedence over text. The exported locator is therefore
-    always represented by ``type`` plus its matching ``value`` while retaining
-    the original key/text metadata for readability and fallback matching.
+    A stable key is preferred. When no key exists, visible text is used. The
+    exported step contains only ``type``, ``value``, ``key_description`` and
+    ``step_prompt``.
     """
     compact = compact_target(target)
     if not compact:
@@ -108,48 +88,52 @@ def format_path_target(
     elif legacy_type in {"key", "text"} and legacy_value not in (None, "", []):
         locator_type, locator_value = legacy_type, legacy_value
 
-    component_type = str(compact.get("component_type") or "").strip()
-    if not component_type and key:
-        component_type = _unique_component_type((component_types_by_key or {}).get(key))
-    if not component_type and text:
-        component_type = _unique_component_type((component_types_by_text or {}).get(text))
+    if not locator_type:
+        return {}
 
-    formatted: Target = {}
-    if locator_type:
-        formatted["type"] = locator_type
-        formatted["value"] = locator_value
-    elif legacy_type:
-        formatted["type"] = legacy_type
-        if legacy_value not in (None, "", []):
-            formatted["value"] = legacy_value
+    description = str(
+        compact.get("key_description")
+        or compact.get("step_prompt")
+        or text
+        or locator_value
+        or ""
+    ).strip()
+    step_prompt = str(
+        compact.get("step_prompt")
+        or compact.get("key_description")
+        or text
+        or locator_value
+        or ""
+    ).strip()
 
-    if key:
-        formatted["key"] = key
-    if component_type:
-        formatted["component_type"] = component_type
-    if text:
-        formatted["text"] = text
-    for field in ("key_description", "step_prompt", "expect"):
-        value = compact.get(field)
-        if value not in (None, "", []):
-            formatted[field] = value
+    formatted: Target = {
+        "type": locator_type,
+        "value": locator_value,
+    }
+    if description:
+        formatted["key_description"] = description
+    if step_prompt:
+        formatted["step_prompt"] = step_prompt
     return formatted
 
 
 def format_dfs_records(records: List[Dict[str, Any]], graph: Graph) -> List[Dict[str, Any]]:
-    """Return DFS records whose path targets use explicit ``type``/``value`` locators."""
-    by_key, by_text = _candidate_component_type_indexes(graph)
+    """Return only the fixed compact fields allowed in DFS output JSON."""
+    del graph  # Kept in the public signature for compatibility with callers.
     formatted_records: List[Dict[str, Any]] = []
     for record in records:
         if not isinstance(record, dict):
             continue
-        formatted = dict(record)
-        formatted["path_snapshot"] = [
-            formatted_target
-            for target in record.get("path_snapshot") or []
-            if (formatted_target := format_path_target(target, by_key, by_text))
-        ]
-        formatted_records.append(formatted)
+        formatted_records.append({
+            "package_name": str(record.get("package_name") or ""),
+            "main_page_name": str(record.get("main_page_name") or ""),
+            "page_description": str(record.get("page_description") or ""),
+            "path_snapshot": [
+                formatted_target
+                for target in record.get("path_snapshot") or []
+                if (formatted_target := format_path_target(target))
+            ],
+        })
     return formatted_records
 
 
@@ -279,8 +263,7 @@ def main() -> None:
     else:
         print(f"DFS 页面路径数量: {len(output)}")
         for index, record in enumerate(output, start=1):
-            operation_count = len(record.get("special_operate") or [])
-            print(f"{index:03d}. {record['page_description']} (special_operate={operation_count})")
+            print(f"{index:03d}. {record['page_description']}")
         print(f"精简路径已保存: {output_path}")
         unreachable = exporter.unreachable_pages()
         if unreachable:
