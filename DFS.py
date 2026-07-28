@@ -117,10 +117,55 @@ def format_path_target(target: Any) -> Target:
     return formatted
 
 
+def root_dfs_record(graph: Graph, records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Build the root-page record whose navigation path is intentionally empty."""
+    states = graph.get("states")
+    if not isinstance(states, dict):
+        return None
+
+    traversal_config = graph.get("traversal_config")
+    configured_root = (
+        traversal_config.get("root_page")
+        if isinstance(traversal_config, dict)
+        else ""
+    )
+    root_page = str(configured_root or "Pages_root")
+    root_state = states.get(root_page)
+    if not isinstance(root_state, dict):
+        return None
+
+    first_record = next((item for item in records if isinstance(item, dict)), {})
+    description = str(
+        root_state.get("last_title")
+        or root_state.get("page_description")
+        or root_page
+    ).strip()
+    return {
+        "package_name": str(
+            graph.get("package_name")
+            or first_record.get("package_name")
+            or ""
+        ),
+        "main_page_name": str(
+            graph.get("main_page_name")
+            or first_record.get("main_page_name")
+            or ""
+        ),
+        "page_description": description,
+        "path_snapshot": [],
+    }
+
+
 def format_dfs_records(records: List[Dict[str, Any]], graph: Graph) -> List[Dict[str, Any]]:
-    """Return only the fixed compact fields allowed in DFS output JSON."""
-    del graph  # Kept in the public signature for compatibility with callers.
+    """Return only the fixed compact fields allowed in DFS output JSON.
+
+    The root page is emitted first with an empty ``path_snapshot`` because no
+    tap is required to reach the application's initial page.
+    """
     formatted_records: List[Dict[str, Any]] = []
+    if root_record := root_dfs_record(graph, records):
+        formatted_records.append(root_record)
+
     for record in records:
         if not isinstance(record, dict):
             continue
