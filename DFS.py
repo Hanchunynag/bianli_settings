@@ -48,6 +48,111 @@ def compact_target(target: Any) -> Target:
     }
 
 
+def _candidate_component_type_indexes(graph: Graph) -> tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
+    """Index recorded candidate component types by stable key and visible text."""
+    by_key: Dict[str, Set[str]] = {}
+    by_text: Dict[str, Set[str]] = {}
+    states = graph.get("states") or {}
+    if not isinstance(states, dict):
+        return by_key, by_text
+
+    for state in states.values():
+        if not isinstance(state, dict):
+            continue
+        for candidate in state.get("merged_candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            component_type = str(candidate.get("component_type") or "").strip()
+            if not component_type:
+                continue
+            key = str(candidate.get("key") or "").strip()
+            text = str(candidate.get("text") or "").strip()
+            if key:
+                by_key.setdefault(key, set()).add(component_type)
+            if text:
+                by_text.setdefault(text, set()).add(component_type)
+    return by_key, by_text
+
+
+def _unique_component_type(values: Optional[Set[str]]) -> str:
+    """Return a component type only when the candidate identity is unambiguous."""
+    return next(iter(values)) if values and len(values) == 1 else ""
+
+
+def format_path_target(
+    target: Any,
+    component_types_by_key: Optional[Dict[str, Set[str]]] = None,
+    component_types_by_text: Optional[Dict[str, Set[str]]] = None,
+) -> Target:
+    """Convert a navigation target to the explicit locator schema used by DFS JSON.
+
+    Stable keys take precedence over text. The exported locator is therefore
+    always represented by ``type`` plus its matching ``value`` while retaining
+    the original key/text metadata for readability and fallback matching.
+    """
+    compact = compact_target(target)
+    if not compact:
+        return {}
+
+    key = str(compact.get("key") or "").strip()
+    text = str(compact.get("text") or "").strip()
+    legacy_type = str(compact.get("type") or "").strip()
+    legacy_value = compact.get("value")
+
+    locator_type = ""
+    locator_value: Any = None
+    if key:
+        locator_type, locator_value = "key", key
+    elif text:
+        locator_type, locator_value = "text", text
+    elif legacy_type in {"key", "text"} and legacy_value not in (None, "", []):
+        locator_type, locator_value = legacy_type, legacy_value
+
+    component_type = str(compact.get("component_type") or "").strip()
+    if not component_type and key:
+        component_type = _unique_component_type((component_types_by_key or {}).get(key))
+    if not component_type and text:
+        component_type = _unique_component_type((component_types_by_text or {}).get(text))
+
+    formatted: Target = {}
+    if locator_type:
+        formatted["type"] = locator_type
+        formatted["value"] = locator_value
+    elif legacy_type:
+        formatted["type"] = legacy_type
+        if legacy_value not in (None, "", []):
+            formatted["value"] = legacy_value
+
+    if key:
+        formatted["key"] = key
+    if component_type:
+        formatted["component_type"] = component_type
+    if text:
+        formatted["text"] = text
+    for field in ("key_description", "step_prompt", "expect"):
+        value = compact.get(field)
+        if value not in (None, "", []):
+            formatted[field] = value
+    return formatted
+
+
+def format_dfs_records(records: List[Dict[str, Any]], graph: Graph) -> List[Dict[str, Any]]:
+    """Return DFS records whose path targets use explicit ``type``/``value`` locators."""
+    by_key, by_text = _candidate_component_type_indexes(graph)
+    formatted_records: List[Dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        formatted = dict(record)
+        formatted["path_snapshot"] = [
+            formatted_target
+            for target in record.get("path_snapshot") or []
+            if (formatted_target := format_path_target(target, by_key, by_text))
+        ]
+        formatted_records.append(formatted)
+    return formatted_records
+
+
 def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]], List[str]]:
     states = graph.get("states")
     if not isinstance(states, dict):
@@ -165,7 +270,7 @@ def main() -> None:
         raise ValueError("navigation graph root must be a JSON object")
     root_page = str(args.root or graph.get("traversal_config", {}).get("root_page") or "Pages_root")
     exporter = DfsPathExporter(graph, root_page)
-    output = exporter.build()
+    output = format_dfs_records(exporter.build(), graph)
     output_path = Path(args.output) if args.output else graph_path.parent / "settings_navigation_paths.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
