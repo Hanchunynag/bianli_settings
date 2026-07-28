@@ -56,6 +56,7 @@ from settings_ui_manual_recorder import (
     upsert_clicked_target_as_candidate,
     get_page_merged_candidates,
     step_target,
+    transition_id_for_pages,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -449,9 +450,7 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
 
     steps = list(chain.get("steps", [])) if chain else []
     steps.append({"operate": "tap", "target": step_target(target)})
-    id_payload = {"from_page": from_page, "to_page": str(to_page), "steps": steps, "effect": effect}
-    digest = hashlib.sha1(json.dumps(id_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
-    tid = f"{from_page}__to__{to_page}__steps_{digest}"
+    tid = transition_id_for_pages(from_page, to_page)
     transition = {
         "transition_id": tid,
         "from_page": from_page,
@@ -580,14 +579,7 @@ def api_console_action(req: ActionRequest) -> JSONResponse:
         description = f"横向{'左' if direction == 'left' else '右'}滑"
         target = {"type": "gesture", "value": f"swipe_{direction}", "key_description": description, "step_prompt": description, "axis": "horizontal"}
         effect = "local_horizontal_view_changed"
-        id_payload = {
-            "from_page": active_page,
-            "operate": operate,
-            "to_page": page_name,
-            "target": {key: target[key] for key in ("type", "value", "key", "component_type", "key_description", "step_prompt") if target.get(key)},
-            "effect": effect,
-        }
-        tid = f"{active_page}__to__{page_name}__{operate}_{hashlib.sha1(json.dumps(id_payload, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()[:12]}"
+        tid = transition_id_for_pages(active_page, page_name)
         graph.setdefault("states", {})[page_name] = view_state
         NavigationGraph(graph).add_transition({
             "transition_id": tid,

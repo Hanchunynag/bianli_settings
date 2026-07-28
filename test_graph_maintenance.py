@@ -18,7 +18,10 @@ from settings_ui_manual_recorder import (
     build_page_directory,
     contextualize_child_state,
     extract_navigation_candidates,
+    hit_test_full_ui_tree,
+    is_stable_key_for_navigation,
     navigation_graph_path,
+    normalize_semantic_target_types,
     reorder_child_transitions,
     resolve_detected_state,
 )
@@ -274,6 +277,194 @@ class GraphMaintenanceTest(unittest.TestCase):
         self.assertNotIn("type", key_only)
         self.assertEqual(unidentified_button["type"], "button")
 
+    def test_dynamic_inner_keys_are_unstable_and_rechecked_before_target_write(self):
+        for key in ("0_Inner", "3_inner", "12_iNnEr"):
+            with self.subTest(key=key):
+                self.assertFalse(is_stable_key_for_navigation(key))
+        for key in (
+            "item*dynamic",
+            "AvailableDeviceGroup.entry",
+            "entry_12345678",
+            "0123456789abcdef",
+        ):
+            with self.subTest(key=key):
+                self.assertFalse(is_stable_key_for_navigation(key))
+
+        target = build_semantic_target_from_node({
+            "component_type": "ListItem",
+            "key": "3_Inner",
+            "text": "显示和亮度",
+        })
+        self.assertEqual(target, {
+            "text": "显示和亮度",
+            "key_description": "显示和亮度",
+            "step_prompt": "显示和亮度",
+        })
+
+    def test_hit_test_uses_unique_deep_key_and_keeps_searching_for_text(self):
+        root = node("Root", bounds="[0,0][1080,2400]", children=[
+            node(
+                "ListItem",
+                key="duplicate_entry",
+                clickable=True,
+                bounds="[40,200][1040,420]",
+                children=[
+                    node("Column", key="3_Inner", bounds="[40,200][1040,420]", children=[
+                        node("Text", key="display_settings", bounds="[80,230][500,290]"),
+                        node("Text", text="显示和亮度", bounds="[80,300][500,370]"),
+                    ]),
+                ],
+            ),
+            node("Column", key="duplicate_entry", bounds="[40,600][1040,800]"),
+        ])
+
+        hit = hit_test_full_ui_tree(root, 300, 300)
+        target = build_semantic_target_from_node(hit)
+
+        self.assertEqual(hit["key"], "display_settings")
+        self.assertEqual(hit["text"], "显示和亮度")
+        self.assertEqual(target, {
+            "key": "display_settings",
+            "text": "显示和亮度",
+            "key_description": "显示和亮度",
+            "step_prompt": "显示和亮度",
+        })
+
+    def test_hit_test_does_not_borrow_identity_from_nested_clickable(self):
+        root = node("Root", bounds="[0,0][1080,2400]", children=[
+            node(
+                "ListItem",
+                clickable=True,
+                bounds="[40,200][1040,420]",
+                children=[
+                    node("Text", text="显示和亮度", bounds="[80,230][500,290]"),
+                    node(
+                        "Switch",
+                        key="brightness_toggle",
+                        text="自动亮度",
+                        clickable=True,
+                        bounds="[800,240][980,360]",
+                    ),
+                ],
+            ),
+        ])
+
+        hit = hit_test_full_ui_tree(root, 300, 300)
+
+        self.assertEqual(hit["text"], "显示和亮度")
+        self.assertEqual(hit["key"], "")
+
+    def test_legacy_unstable_key_is_removed_without_losing_text(self):
+        target = {
+            "type": "key",
+            "value": "3_Inner",
+            "text": "显示和亮度",
+        }
+
+        normalize_semantic_target_types(target)
+
+        self.assertEqual(target, {"text": "显示和亮度"})
+
+    def test_add_transition_replaces_page_pair_and_inherits_priority(self):
+        graph = {
+            "states": {
+                "Pages_root": state("设置", [{
+                    "candidate_id": "text::显示和亮度",
+                    "text": "显示和亮度",
+                    "transition_ids": ["old-first", "old-latest"],
+                }]),
+                "Pages_display": state("显示和亮度"),
+            },
+            "transitions": [
+                {
+                    **transition("old-first", "Pages_root", "Pages_display"),
+                    "priority": 20,
+                    "target": {"text": "旧入口"},
+                },
+                {
+                    **transition("old-latest", "Pages_root", "Pages_display"),
+                    "target": {"text": "较新入口"},
+                },
+            ],
+        }
+        latest = {
+            "transition_id": "ignored-steps-hash",
+            "from_page": "Pages_root",
+            "to_page": "Pages_display",
+            "target": {"key": "display_settings", "text": "显示和亮度"},
+            "steps": [{"operate": "tap", "target": {"text": "显示和亮度"}}],
+        }
+
+        NavigationGraph(graph).add_transition(latest)
+
+        self.assertEqual(len(graph["transitions"]), 1)
+        self.assertIs(graph["transitions"][0], latest)
+        self.assertEqual(latest["transition_id"], "Pages_root__to__Pages_display")
+        self.assertEqual(latest["priority"], 20)
+        self.assertEqual(latest["target"]["text"], "显示和亮度")
+        self.assertEqual(
+            graph["states"]["Pages_root"]["merged_candidates"][0]["transition_ids"],
+            ["Pages_root__to__Pages_display"],
+        )
+
+    def test_graph_load_and_save_clean_targets_and_duplicate_page_pairs(self):
+        raw_graph = {
+            "states": {
+                "Pages_root": state("设置", [{
+                    "candidate_id": "text::显示和亮度",
+                    "text": "显示和亮度",
+                    "transition_ids": ["old-a", "old-b"],
+                }]),
+                "Pages_display": {
+                    **state("显示和亮度"),
+                    "page_operations": [{
+                        "operation_id": "op",
+                        "target": {"key": "0_Inner", "text": "自动亮度"},
+                    }],
+                },
+            },
+            "transitions": [
+                {
+                    **transition("old-a", "Pages_root", "Pages_display"),
+                    "target": {"key": "3_Inner", "text": "旧入口"},
+                    "steps": [{"target": {"key": "3_Inner", "text": "旧入口"}}],
+                },
+                {
+                    **transition("old-b", "Pages_root", "Pages_display"),
+                    "target": {"type": "key", "value": "3_Inner", "text": "显示和亮度"},
+                    "steps": [{"target": {"key": "display_settings", "text": "显示和亮度"}}],
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = NavigationGraphRepository(Path(temp_dir))
+            repository.path.parent.mkdir(parents=True)
+            repository.path.write_text(
+                json.dumps(raw_graph, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            loaded = repository.load()
+
+            self.assertEqual(len(loaded["transitions"]), 1)
+            kept = loaded["transitions"][0]
+            self.assertEqual(kept["transition_id"], "Pages_root__to__Pages_display")
+            self.assertEqual(kept["target"], {"text": "显示和亮度"})
+            self.assertEqual(kept["steps"][0]["target"]["key"], "display_settings")
+            self.assertNotIn(
+                "key",
+                loaded["states"]["Pages_display"]["page_operations"][0]["target"],
+            )
+            self.assertEqual(
+                loaded["states"]["Pages_root"]["merged_candidates"][0]["transition_ids"],
+                ["Pages_root__to__Pages_display"],
+            )
+
+            repository.save(loaded)
+            saved = json.loads(repository.path.read_text(encoding="utf-8"))
+            self.assertEqual(len(saved["transitions"]), 1)
+            self.assertEqual(saved["transitions"][0]["transition_id"], "Pages_root__to__Pages_display")
+
     def test_demo_and_dfs_output_stay_compatible(self):
         graph, active_page = build_large_settings_graph()
         output = DfsPathExporter(graph, "Pages_root").build()
@@ -284,9 +475,13 @@ class GraphMaintenanceTest(unittest.TestCase):
             separators=(",", ":"),
         ).encode()).hexdigest()
 
-        self.assertEqual((len(graph["states"]), len(graph["transitions"]), len(output)), (181, 182, 180))
+        self.assertEqual((len(graph["states"]), len(graph["transitions"]), len(output)), (181, 180, 180))
+        self.assertEqual(
+            len({(item["from_page"], item["to_page"]) for item in graph["transitions"]}),
+            len(graph["transitions"]),
+        )
         self.assertIn(active_page, graph["states"])
-        self.assertEqual(digest, "d78481fa633fd1134c4e68cf57a1143575b79bfa09a0764fd82755eab28c5979")
+        self.assertEqual(digest, "b4aa023328c5331c6a0b0604442ab5f9c826b7a69152f1f7deadb2e95216d799")
 
     def test_demo_ui_candidate_extraction_stays_compatible(self):
         root = themes_tree()

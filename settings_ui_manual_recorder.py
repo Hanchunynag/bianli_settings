@@ -250,6 +250,8 @@ def normalize_semantic_target_types(target: Any, preserve_type: bool = False) ->
         target.pop("type", None)
     target.pop("component_type", None)
     target.pop("value", None)
+    if "key" in target and not is_stable_key_for_navigation(target.get("key")):
+        target.pop("key", None)
 
 
 def normalize_navigation_graph_targets(graph: Dict[str, Any]) -> None:
@@ -266,6 +268,61 @@ def normalize_navigation_graph_targets(graph: Dict[str, Any]) -> None:
         for operation in state.get("page_operations", []) or []:
             if isinstance(operation, dict):
                 normalize_semantic_target_types(operation.get("target"), preserve_type=True)
+
+
+def transition_id_for_pages(from_page: Any, to_page: Any) -> str:
+    """Return the canonical identity for the one edge allowed per page pair."""
+    return f"{str(from_page or '')}__to__{str(to_page or '')}"
+
+
+def _rewrite_transition_id_lists(value: Any, id_map: Dict[str, str]) -> None:
+    """Keep candidate-to-transition references valid after canonical ID migration."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "transition_ids" and isinstance(item, list):
+                rewritten: List[Any] = []
+                for transition_id in item:
+                    mapped = id_map.get(str(transition_id), transition_id)
+                    if mapped not in rewritten:
+                        rewritten.append(mapped)
+                value[key] = rewritten
+            else:
+                _rewrite_transition_id_lists(item, id_map)
+    elif isinstance(value, list):
+        for item in value:
+            _rewrite_transition_id_lists(item, id_map)
+
+
+def normalize_navigation_graph_transitions(graph: Dict[str, Any]) -> None:
+    """Keep the last transition per page pair and canonicalize its ID."""
+    transitions = graph.get("transitions")
+    if not isinstance(transitions, list):
+        return
+    seen_pairs: Set[Tuple[str, str]] = set()
+    kept_reversed: List[Any] = []
+    id_map: Dict[str, str] = {}
+    for transition in reversed(transitions):
+        if not isinstance(transition, dict):
+            kept_reversed.append(transition)
+            continue
+        from_page = str(transition.get("from_page") or "")
+        to_page = str(transition.get("to_page") or "")
+        if not from_page or not to_page:
+            kept_reversed.append(transition)
+            continue
+        pair = (from_page, to_page)
+        canonical_id = transition_id_for_pages(from_page, to_page)
+        old_id = str(transition.get("transition_id") or "")
+        if old_id:
+            id_map[old_id] = canonical_id
+        transition["transition_id"] = canonical_id
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        kept_reversed.append(transition)
+    transitions[:] = reversed(kept_reversed)
+    if id_map:
+        _rewrite_transition_id_lists(graph, id_map)
 
 
 def load_navigation_graph(work_dir: Path) -> Dict[str, Any]:
@@ -291,12 +348,14 @@ def load_navigation_graph(work_dir: Path) -> Dict[str, Any]:
     graph.setdefault("traversal_config", {"strategy": "dfs", "root_page": "Pages_root", "default_return_policy": {"type": "system_back"}})
     strip_coordinate_fields(graph)
     normalize_navigation_graph_targets(graph)
+    normalize_navigation_graph_transitions(graph)
     return graph
 
 
 def save_navigation_graph(graph: Dict[str, Any], work_dir: Path) -> None:
     strip_coordinate_fields(graph)
     normalize_navigation_graph_targets(graph)
+    normalize_navigation_graph_transitions(graph)
     graph["updated_at"] = now_iso()
     save_json(graph, navigation_graph_path(work_dir), "轻量导航状态图")
 
@@ -365,14 +424,49 @@ class NavigationGraph:
             raise ValueError("navigation graph transitions 必须是数组")
 
     def add_transition(self, transition: Dict[str, Any]) -> None:
-        tid = str(transition.get("transition_id") or "")
-        if not tid:
-            raise ValueError("transition 缺少 transition_id")
+        from_page = str(transition.get("from_page") or "")
+        to_page = str(transition.get("to_page") or "")
+        if not from_page or not to_page:
+            raise ValueError("transition 缺少 from_page 或 to_page")
+        pair = (from_page, to_page)
+        old_transitions = [
+            item
+            for item in self.transitions
+            if isinstance(item, dict)
+            and (
+                str(item.get("from_page") or ""),
+                str(item.get("to_page") or ""),
+            ) == pair
+        ]
+        if transition.get("priority") in (None, "", []):
+            inherited_priority = next((
+                item.get("priority")
+                for item in reversed(old_transitions)
+                if item.get("priority") not in (None, "", [])
+            ), None)
+            if inherited_priority is not None:
+                transition["priority"] = inherited_priority
+        tid = transition_id_for_pages(from_page, to_page)
+        transition["transition_id"] = tid
+        old_ids = {
+            str(item.get("transition_id") or "")
+            for item in old_transitions
+            if item.get("transition_id")
+        }
         self.transitions[:] = [
             item
             for item in self.transitions
-            if not isinstance(item, dict) or item.get("transition_id") != tid
+            if not isinstance(item, dict)
+            or (
+                str(item.get("from_page") or ""),
+                str(item.get("to_page") or ""),
+            ) != pair
         ]
+        if old_ids:
+            _rewrite_transition_id_lists(
+                self.graph,
+                {old_id: tid for old_id in old_ids},
+            )
         self.transitions.append(transition)
 
     def reorder_children(
@@ -474,6 +568,7 @@ class NavigationGraph:
             self.states.pop(old_name)
             self.states[new_name] = state
             _replace_page_references(self.graph, old_name, new_name)
+            normalize_navigation_graph_transitions(self.graph)
         state["page_name"] = new_name
         if new_title.strip():
             state["last_title"] = new_title.strip()
@@ -654,6 +749,8 @@ def is_stable_key_for_navigation(key: Any) -> bool:
     text = str(key or "").strip()
     if not text or "*" in text or "AvailableDeviceGroup" in text:
         return False
+    if re.fullmatch(r"\d+_Inner", text, flags=re.IGNORECASE):
+        return False
     if re.search(r"\d{8,}", text):
         return False
     if re.fullmatch(r"[0-9a-fA-F\-]{16,}", text):
@@ -808,6 +905,12 @@ def hit_test_full_ui_tree(
     y: int,
 ) -> Optional[Dict[str, Any]]:
     """优先命中最深 Item 内的首个 clickable，否则选择覆盖点的最小 clickable。"""
+    stable_key_counts: Dict[str, int] = defaultdict(int)
+    for tree_node, _, _ in walk(root):
+        tree_key = get_key(tree_node).strip()
+        if is_stable_key_for_navigation(tree_key):
+            stable_key_counts[tree_key] += 1
+
     item_types = {"ListItem", "GridItem"}
     screen = screen_metrics_from_root(root).get("screen_size") or [0, 0]
     screen_area = int(screen[0] or 0) * int(screen[1] or 0) if len(screen) == 2 else 0
@@ -850,7 +953,7 @@ def hit_test_full_ui_tree(
         return None
     key = get_key(clickable_node)
     text = clean_label(get_text(clickable_node))
-    if not is_stable_key_for_navigation(key):
+    if not is_stable_key_for_navigation(key) or stable_key_counts.get(key.strip(), 0) != 1:
         key = ""
     if not is_stable_text_for_navigation(text):
         text = ""
@@ -858,11 +961,18 @@ def hit_test_full_ui_tree(
         stack = list(reversed(clickable_node.get("children", []) or []))
         while stack:
             node = stack.pop()
-            if get_type(node) in item_types:
+            clickable = node.get("attributes", node).get("clickable", False)
+            if (
+                (isinstance(clickable, (int, float)) and clickable != 0)
+                or str(clickable).strip().lower() in {"true", "1", "yes"}
+            ):
                 continue
             if not key:
                 child_key = get_key(node)
-                if is_stable_key_for_navigation(child_key):
+                if (
+                    is_stable_key_for_navigation(child_key)
+                    and stable_key_counts.get(child_key.strip(), 0) == 1
+                ):
                     key = child_key
             if not text:
                 child_text = clean_label(get_text(node))
@@ -888,7 +998,8 @@ def build_semantic_target_from_node(hit_node: Optional[Dict[str, Any]], manual_l
         return {"needs_manual_label": True}
     ctype = str(hit_node.get("component_type") or "")
     text = clean_label(hit_node.get("text") or "")
-    key = str(hit_node.get("key") or "")
+    raw_key = str(hit_node.get("key") or "")
+    key = raw_key if is_stable_key_for_navigation(raw_key) else ""
     if manual_label:
         target = {
             "key": key,

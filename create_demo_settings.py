@@ -8,7 +8,12 @@ import struct
 import zlib
 from pathlib import Path
 
-from settings_ui_manual_recorder import save_navigation_graph, state_name_from_title
+from settings_ui_manual_recorder import (
+    NavigationGraph,
+    save_navigation_graph,
+    state_name_from_title,
+    transition_id_for_pages,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -213,18 +218,23 @@ def build_large_settings_graph():
     wlan_page = title_to_page["WLAN"]
     saved_page = title_to_page["WLAN/已保存的网络"]
     wlan_more_page = title_to_page["WLAN/WLAN 更多信息"]
+    wlan_more_tid = transition_id_for_pages(wlan_page, wlan_more_page)
+    wlan_saved_tid = transition_id_for_pages(wlan_page, saved_page)
     graph["states"][wlan_page]["merged_candidates"] = [
         candidate("WLAN 开关", "wifi.master.switch", [], "Button"),
-        candidate("右上角更多按钮", "wifi.more.button", ["wlan_to_more_info"], "Button"),
-        candidate("已保存的网络", "wifi.saved.networks", ["wlan_to_saved_networks"]),
+        candidate("右上角更多按钮", "wifi.more.button", [wlan_more_tid], "Button"),
+        candidate("已保存的网络", "wifi.saved.networks", [wlan_saved_tid]),
     ] + graph["states"][wlan_page].get("merged_candidates", [])
-    graph["transitions"].extend([
-        transition("wlan_to_more_info", wlan_page, wlan_more_page, [
+    navigation = NavigationGraph(graph)
+    navigation.add_transition(
+        transition(wlan_more_tid, wlan_page, wlan_more_page, [
             step("右上角更多按钮", "wifi.more.button"),
             step("弹出菜单：更多信息", "wifi.more.info.menu_item"),
-        ]),
-        transition("wlan_to_saved_networks", wlan_page, saved_page, [step("已保存的网络", "wifi.saved.networks")]),
-    ])
+        ])
+    )
+    navigation.add_transition(
+        transition(wlan_saved_tid, wlan_page, saved_page, [step("已保存的网络", "wifi.saved.networks")])
+    )
 
     themes_page = title_to_page["桌面和个性化/主题"]
     graph["states"][themes_page]["page_operations"] = [
