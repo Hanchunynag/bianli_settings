@@ -68,6 +68,39 @@ class DfsLocatorFormatTest(unittest.TestCase):
             }],
         }])
 
+    def test_root_page_is_emitted_first_with_empty_path(self):
+        graph = {
+            "package_name": "com.huawei.hmos.settings",
+            "main_page_name": "com.huawei.hmos.settings.MainAbility",
+            "traversal_config": {"root_page": "Pages_root"},
+            "states": {
+                "Pages_root": {
+                    "last_title": "应用首页",
+                    "page_description": "不应优先使用该值",
+                },
+            },
+        }
+        records = [{
+            "package_name": "com.huawei.hmos.settings",
+            "main_page_name": "com.huawei.hmos.settings.MainAbility",
+            "page_description": "应用和元服务",
+            "path_snapshot": [{
+                "text": "应用和元服务",
+                "key_description": "应用和元服务",
+                "step_prompt": "应用和元服务",
+            }],
+        }]
+
+        output = format_dfs_records(records, graph)
+
+        self.assertEqual(output[0], {
+            "package_name": "com.huawei.hmos.settings",
+            "main_page_name": "com.huawei.hmos.settings.MainAbility",
+            "page_description": "应用首页",
+            "path_snapshot": [],
+        })
+        self.assertEqual(output[1]["page_description"], "应用和元服务")
+
 
 if __name__ == "__main__":
     unittest.main()
