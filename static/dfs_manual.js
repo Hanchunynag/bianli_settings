@@ -1,5 +1,4 @@
 import { postJson, queryJson } from './nav/api.js';
-import { escapeHtml } from './nav/dom.js';
 
 const detailBox = document.getElementById('pageDetail');
 let requestGeneration = 0;
@@ -57,7 +56,10 @@ function createPanel(pageName, data) {
 
     if (action === 'reset') {
       if (!window.confirm(`确认清除 ${pageName} 的 DFS 人工覆盖？`)) return;
-      const result = await postJson('/api/dfs_override', { page_name: pageName, reset: true });
+      const result = await postJson('/api/console_action', {
+        action: 'reset_dfs_override',
+        payload: { page_name: pageName },
+      });
       if (!result) return;
       Object.assign(data, result);
       setEditorData(panel, data);
@@ -73,7 +75,10 @@ function createPanel(pageName, data) {
       errorBox.classList.remove('hidden');
       return;
     }
-    const result = await postJson('/api/dfs_override', { page_name: pageName, record, reset: false });
+    const result = await postJson('/api/console_action', {
+      action: 'save_dfs_override',
+      payload: { page_name: pageName, record },
+    });
     if (!result) return;
     Object.assign(data, result);
     setEditorData(panel, data);
@@ -84,14 +89,14 @@ function createPanel(pageName, data) {
 
 async function renderDfsMaintenance() {
   const pageName = currentPageName();
-  if (!pageName || detailBox.querySelector(`[data-dfs-maintenance="${CSS.escape(pageName)}"]`)) return;
+  const existingPanel = detailBox.querySelector('[data-dfs-maintenance]');
+  if (!pageName || existingPanel?.dataset.dfsMaintenance === pageName) return;
 
   const generation = ++requestGeneration;
   const data = await queryJson(`/api/dfs_record?page_name=${encodeURIComponent(pageName)}`);
   if (!data || generation !== requestGeneration || currentPageName() !== pageName) return;
 
-  const stalePanel = detailBox.querySelector('[data-dfs-maintenance]');
-  if (stalePanel) stalePanel.remove();
+  if (existingPanel) existingPanel.remove();
   detailBox.appendChild(createPanel(pageName, data));
 }
 
