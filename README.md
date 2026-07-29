@@ -12,13 +12,12 @@
 web_nav_server.py                 Web 控制台服务
 settings_ui_manual_recorder.py    UI tree、导航图、clickable 控件提取工具
 DFS.py                            DFS 路径导出脚本
-create_demo_settings.py           生成模拟设置数据
 templates/nav.html                Web 页面模板
 static/nav.css                    页面样式
 static/nav.js                     前端入口
 static/nav/*.js                   前端模块
 requirements.txt                  Python 依赖
-demo_settings/                    模拟数据和输出
+demo_settings/                    现有采集数据和输出
 ```
 
 ## 后续开发指南
@@ -29,10 +28,11 @@ demo_settings/                    模拟数据和输出
 docs/development_guide.md
 ```
 
-## 启动 Demo
+## 启动
+
+先连接设备并确认 `hdc` 可用，然后启动 Web 控制台：
 
 ```bash
-conda run -n hcy-env python create_demo_settings.py
 conda run -n hcy-env python web_nav_server.py \
   --work-dir demo_settings \
   --output-dir demo_settings/outputs/latest \
@@ -56,6 +56,20 @@ conda run -n hcy-env python DFS.py --work-dir demo_settings
 
 默认输出到 `demo_settings/outputs/navigation/settings_navigation_paths.json`。
 当前脚本只生成 JSON，不连接设备、不执行页面操作。
+
+在 Web 控制台的“页面详情 / 可达页面”中可以维护单页 DFS 数据。
+人工配置会独立保存 `page_description` 与完整 `path_snapshot`：例如
+`menu_grid` 这类中间点击仍保留在路径中，但不会被自动拼进页面描述。
+页面详情还提供“生成 DFS 精简文件”和“查看当前页面 DFS 分支”按钮；
+精简结果写入 `demo_settings/outputs/navigation/settings_navigation_paths.json`。
+保存或清除人工 DFS 配置时也会自动重新生成并覆盖该文件，无需再手动点击精简按钮。
+连字符属于合法页面名称字符，例如 `a-b` 会被完整保留。
+
+Web 前端只展示一个页面名称：取 `page_description` 的最后一个页面段。
+例如内部 `page_name=Pages_设置_to关于本机`、完整
+`page_description=设置_关于本机`，目录、详情和 DFS 分支统一显示“关于本机”。
+`page_name` 仅作为后端状态 ID；“修改内部页面 ID”按钮只修改该 ID，
+页面显示名称统一在 DFS 维护区修改。
 
 ## 数据原则
 

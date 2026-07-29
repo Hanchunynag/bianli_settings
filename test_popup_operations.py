@@ -4,14 +4,34 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import web_nav_server
-from create_demo_settings import node
 from settings_ui_manual_recorder import (
     annotate,
     build_navigation_state,
     navigation_graph_path,
     normalize_semantic_target_types,
 )
+
+try:
+    import fastapi  # noqa: F401
+except ImportError:
+    web_nav_server = None
+else:
+    import web_nav_server
+
+
+def node(node_type, key="", text="", bounds="[0,0][0,0]", clickable=False, children=None, **extra):
+    attrs = {
+        "type": node_type,
+        "key": key,
+        "text": text,
+        "bounds": bounds,
+        "visible": "true",
+        "enabled": "true",
+    }
+    if clickable:
+        attrs["clickable"] = "true"
+    attrs.update({key: value for key, value in extra.items() if value not in (None, "")})
+    return {"attributes": attrs, "children": children or []}
 
 
 def popup_tree(popup_type: str = ""):
@@ -42,6 +62,7 @@ def popup_tree(popup_type: str = ""):
     return root
 
 
+@unittest.skipIf(web_nav_server is None, "FastAPI dependency is not installed")
 class PopupOperationTest(unittest.TestCase):
     def test_popup_type_is_required_and_limited_to_the_collection(self):
         self.assertEqual(web_nav_server.POPUP_TYPES, ("SheetWrapper", "Dialog", "MenuWrapper"))

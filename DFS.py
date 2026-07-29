@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -42,6 +43,8 @@ DFS_TARGET_FIELDS = (
     "key_description",
     "step_prompt",
 )
+
+DFS_MANUAL_FIELD = "dfs_manual"
 
 
 def safe_priority(value: Any, default: int = 1000) -> int:
@@ -117,6 +120,227 @@ def format_path_target(target: Any) -> Target:
     return formatted
 
 
+def is_human_description(value: Any) -> bool:
+    """Return whether a label is suitable for a user-facing page description."""
+    label = str(value or "").strip()
+    if not label or not any(char.isalnum() or "\u4e00" <= char <= "\u9fff" for char in label):
+        return False
+    # 下划线、点号连接的纯英文通常是控件 key；连字符可能是合法页面名，
+    # 例如 a-b，因此不能把 "-" 当作技术标识符特征。
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*(?:[._][A-Za-z0-9-]+)+", label):
+        return False
+    return True
+
+
+def transition_destination_label(transition: Transition) -> str:
+    """Use only the destination action label, never intermediate menu actions."""
+    steps = transition.get("steps")
+    targets: List[Target] = []
+    if isinstance(steps, list):
+        targets = [
+            step.get("target")
+            for step in steps
+            if isinstance(step, dict) and isinstance(step.get("target"), dict)
+        ]
+    if not targets and isinstance(transition.get("target"), dict):
+        targets = [transition["target"]]
+    for target in reversed(targets):
+        for field in ("step_prompt", "key_description", "text"):
+            label = str(target.get(field) or "").strip()
+            if is_human_description(label):
+                return label
+    return ""
+
+
+def page_description_leaf(value: Any) -> str:
+    """Return the page-local label from a contextual description or page id."""
+    label = str(value or "").strip()
+    if not label:
+        return ""
+    if label.startswith("Pages_"):
+        label = label.removeprefix("Pages_")
+    for separator in ("_to", " to"):
+        if separator in label:
+            label = label.rsplit(separator, 1)[-1].strip()
+    if "_" in label:
+        label = label.rsplit("_", 1)[-1].strip()
+    return label
+
+
+def dfs_record_display_name(record: Any, page_name: str = "") -> str:
+    """Choose the one short page name shown by the Web console."""
+    if isinstance(record, dict):
+        description = page_description_leaf(record.get("page_description"))
+        if is_human_description(description):
+            return description
+        for target in reversed(record.get("path_snapshot") or []):
+            if not isinstance(target, dict):
+                continue
+            for field in ("step_prompt", "key_description", "text", "value", "key"):
+                label = str(target.get(field) or "").strip()
+                if is_human_description(label):
+                    return label
+    fallback = page_description_leaf(page_name)
+    return fallback or str(page_name or "")
+
+
+def page_description_segment(
+    page_name: str,
+    state: Dict[str, Any],
+    transition: Transition,
+    previous_segments: List[str],
+) -> str:
+    """Choose one semantic page label for this reached state."""
+    previous = previous_segments[-1] if previous_segments else ""
+    manual = normalize_manual_dfs(state.get(DFS_MANUAL_FIELD))
+    manual_label = dfs_record_display_name(manual) if manual else ""
+    candidates = [
+        manual_label,
+        page_description_leaf(state.get("page_description")),
+        page_description_leaf(state.get("last_title")),
+        transition_destination_label(transition),
+        page_description_leaf(page_name),
+    ]
+    for value in candidates:
+        label = str(value or "").strip()
+        if not is_human_description(label) or label == previous:
+            continue
+        return label
+    return ""
+
+
+def normalize_manual_dfs(value: Any) -> Optional[Dict[str, Any]]:
+    """Normalize a persisted manual DFS record without leaking extra fields."""
+    if not isinstance(value, dict):
+        return None
+    path = value.get("path_snapshot")
+    if not isinstance(path, list):
+        return None
+    return {
+        "package_name": str(value.get("package_name") or "").strip(),
+        "main_page_name": str(value.get("main_page_name") or "").strip(),
+        "page_description": str(value.get("page_description") or "").strip(),
+        "path_snapshot": [
+            formatted
+            for target in path
+            if (formatted := format_path_target(target))
+        ],
+    }
+
+
+def sync_descendant_manual_dfs_prefixes(
+    graph: Graph,
+    page_name: str,
+    old_path: List[Target],
+    new_path: List[Target],
+    old_description: str = "",
+    new_description: str = "",
+) -> List[str]:
+    """Replace one page's old DFS prefix in every manual descendant record.
+
+    Descendant matching follows the navigation graph, while prefix matching
+    uses only the locator ``type`` and ``value``.  This allows descriptions to
+    be repaired even when the descendant still contains the old labels.
+    """
+    states = graph.get("states")
+    if not isinstance(states, dict) or page_name not in states:
+        return []
+
+    old_prefix = [
+        formatted
+        for target in old_path
+        if (formatted := format_path_target(target))
+    ]
+    new_prefix = [
+        formatted
+        for target in new_path
+        if (formatted := format_path_target(target))
+    ]
+    if not old_prefix:
+        return []
+
+    outgoing: Dict[str, List[str]] = {}
+    for transition in graph.get("transitions") or []:
+        if not isinstance(transition, dict):
+            continue
+        source = str(transition.get("from_page") or "")
+        target = str(transition.get("to_page") or "")
+        if source and target and source != target:
+            outgoing.setdefault(source, []).append(target)
+
+    descendants: Set[str] = set()
+    stack = list(outgoing.get(page_name, []))
+    while stack:
+        current = stack.pop()
+        if current == page_name or current in descendants:
+            continue
+        descendants.add(current)
+        stack.extend(outgoing.get(current, []))
+
+    def same_locator(left: Target, right: Target) -> bool:
+        return (
+            str(left.get("type") or "") == str(right.get("type") or "")
+            and str(left.get("value") or "") == str(right.get("value") or "")
+        )
+
+    updated_pages: List[str] = []
+    for descendant in sorted(descendants):
+        state = states.get(descendant)
+        if not isinstance(state, dict):
+            continue
+        manual = state.get(DFS_MANUAL_FIELD)
+        if not isinstance(manual, dict):
+            continue
+        manual_path = [
+            formatted
+            for target in manual.get("path_snapshot") or []
+            if (formatted := format_path_target(target))
+        ]
+        if len(manual_path) < len(old_prefix):
+            continue
+        if not all(
+            same_locator(manual_path[index], old_prefix[index])
+            for index in range(len(old_prefix))
+        ):
+            continue
+        manual["path_snapshot"] = [
+            *(dict(target) for target in new_prefix),
+            *(dict(target) for target in manual_path[len(old_prefix):]),
+        ]
+        descendant_description = str(manual.get("page_description") or "")
+        if (
+            old_description
+            and new_description
+            and (
+                descendant_description == old_description
+                or descendant_description.startswith(f"{old_description}_")
+            )
+        ):
+            replaced_description = (
+                f"{new_description}{descendant_description[len(old_description):]}"
+            )
+            manual["page_description"] = replaced_description
+            if state.get("page_description") == descendant_description:
+                state["page_description"] = replaced_description
+        updated_pages.append(descendant)
+    return updated_pages
+
+
+def apply_manual_dfs(record: Dict[str, Any], state: Any) -> Dict[str, Any]:
+    """Apply the page's explicit DFS record when one has been maintained."""
+    manual = normalize_manual_dfs(
+        state.get(DFS_MANUAL_FIELD) if isinstance(state, dict) else None
+    )
+    if not manual:
+        return record
+    return {
+        **record,
+        **manual,
+        "page_name": record.get("page_name"),
+        "is_manual": True,
+    }
+
+
 def root_dfs_record(graph: Graph, records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Build the root-page record whose navigation path is intentionally empty."""
     states = graph.get("states")
@@ -140,7 +364,8 @@ def root_dfs_record(graph: Graph, records: List[Dict[str, Any]]) -> Optional[Dic
         or root_state.get("page_description")
         or root_page
     ).strip()
-    return {
+    record = {
+        "page_name": root_page,
         "package_name": str(
             graph.get("package_name")
             or first_record.get("package_name")
@@ -154,6 +379,21 @@ def root_dfs_record(graph: Graph, records: List[Dict[str, Any]]) -> Optional[Dic
         "page_description": description,
         "path_snapshot": [],
     }
+    return apply_manual_dfs(record, root_state)
+
+
+def format_dfs_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only the four fields accepted by the compact DFS contract."""
+    return {
+        "package_name": str(record.get("package_name") or ""),
+        "main_page_name": str(record.get("main_page_name") or ""),
+        "page_description": str(record.get("page_description") or ""),
+        "path_snapshot": [
+            formatted_target
+            for target in record.get("path_snapshot") or []
+            if (formatted_target := format_path_target(target))
+        ],
+    }
 
 
 def format_dfs_records(records: List[Dict[str, Any]], graph: Graph) -> List[Dict[str, Any]]:
@@ -164,21 +404,12 @@ def format_dfs_records(records: List[Dict[str, Any]], graph: Graph) -> List[Dict
     """
     formatted_records: List[Dict[str, Any]] = []
     if root_record := root_dfs_record(graph, records):
-        formatted_records.append(root_record)
+        formatted_records.append(format_dfs_record(root_record))
 
     for record in records:
         if not isinstance(record, dict):
             continue
-        formatted_records.append({
-            "package_name": str(record.get("package_name") or ""),
-            "main_page_name": str(record.get("main_page_name") or ""),
-            "page_description": str(record.get("page_description") or ""),
-            "path_snapshot": [
-                formatted_target
-                for target in record.get("path_snapshot") or []
-                if (formatted_target := format_path_target(target))
-            ],
-        })
+        formatted_records.append(format_dfs_record(record))
     return formatted_records
 
 
@@ -210,7 +441,11 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
     visited: Set[str] = set()
     records: List[Dict[str, Any]] = []
 
-    def visit(page_name: str, path_snapshot: List[Target]) -> None:
+    def visit(
+        page_name: str,
+        path_snapshot: List[Target],
+        description_segments: List[str],
+    ) -> None:
         if page_name in visited:
             return
         visited.add(page_name)
@@ -218,10 +453,6 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
         if page_name != root_page:
             state = graph.get("states", {}).get(page_name, {})
             fallback = str(state.get("last_title") or state.get("page_description") or page_name) if isinstance(state, dict) else page_name
-            labels = [
-                str(target.get("step_prompt") or target.get("key_description") or target.get("text") or target.get("value") or target.get("key") or "").strip()
-                for target in path_snapshot
-            ]
             operations = []
             seen_operation_ids: Set[str] = set()
             for operation in state.get("page_operations", []) if isinstance(state, dict) else []:
@@ -239,13 +470,15 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
                 if operation.get("effect") not in (None, "", []):
                     item["effect"] = operation["effect"]
                 operations.append(item)
-            records.append({
+            record = {
+                "page_name": page_name,
                 "package_name": str(graph.get("package_name") or ""),
                 "main_page_name": str(graph.get("main_page_name") or ""),
-                "page_description": "_".join(label for label in labels if label) or fallback,
+                "page_description": "_".join(description_segments) or fallback,
                 "path_snapshot": path_snapshot,
                 "special_operate": operations,
-            })
+            }
+            records.append(apply_manual_dfs(record, state))
 
         for transition in outgoing.get(page_name, []):
             to_page = str(transition.get("to_page") or "")
@@ -256,10 +489,120 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
                 target = transition.get("target")
                 steps = [{"operate": transition.get("operate") or "tap", "target": target}] if isinstance(target, dict) and target else []
             targets = [compact_target(step.get("target")) for step in steps if isinstance(step, dict)]
-            visit(to_page, [*path_snapshot, *(target for target in targets if target)])
+            child_state = states.get(to_page, {})
+            segment = page_description_segment(
+                to_page,
+                child_state if isinstance(child_state, dict) else {},
+                transition,
+                description_segments,
+            )
+            visit(
+                to_page,
+                [*path_snapshot, *(target for target in targets if target)],
+                [*description_segments, *([segment] if segment else [])],
+            )
 
-    visit(root_page, [])
+    visit(root_page, [], [])
     return records, sorted(str(page) for page in states if page not in visited)
+
+
+def dfs_records_with_pages(
+    graph: Graph,
+) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Return compact records with page_name retained for Web inspection."""
+    root_page = str(
+        graph.get("traversal_config", {}).get("root_page") or "Pages_root"
+    )
+    raw_records, unreachable = export_dfs_paths(graph, root_page)
+    records: List[Dict[str, Any]] = []
+    if root_record := root_dfs_record(graph, raw_records):
+        records.append({
+            "page_name": root_page,
+            **format_dfs_record(root_record),
+        })
+    records.extend({
+        "page_name": str(record.get("page_name") or ""),
+        **format_dfs_record(record),
+    } for record in raw_records if isinstance(record, dict))
+    return records, unreachable
+
+
+def dfs_record_for_page(graph: Graph, page_name: str) -> Optional[Dict[str, Any]]:
+    """Return the final compact DFS record for one reachable page."""
+    records, _ = dfs_records_with_pages(graph)
+    return next((
+        {key: value for key, value in record.items() if key != "page_name"}
+        for record in records
+        if record.get("page_name") == page_name
+    ), None)
+
+
+def dfs_branch_for_page(graph: Graph, page_name: str) -> Dict[str, Any]:
+    """Return current DFS record and every reachable descendant record."""
+    states = graph.get("states")
+    if not isinstance(states, dict) or page_name not in states:
+        raise ValueError(f"page does not exist in graph: {page_name}")
+
+    outgoing: Dict[str, List[tuple[int, int, str]]] = {}
+    for record_order, transition in enumerate(graph.get("transitions") or []):
+        if not isinstance(transition, dict):
+            continue
+        source = str(transition.get("from_page") or "")
+        target = str(transition.get("to_page") or "")
+        if (
+            not source
+            or not target
+            or source == target
+            or source not in states
+            or target not in states
+        ):
+            continue
+        outgoing.setdefault(source, []).append((
+            safe_priority(transition.get("priority")),
+            record_order,
+            target,
+        ))
+    descendants: Set[str] = set()
+    stack = [page_name]
+    while stack:
+        current = stack.pop()
+        if current in descendants:
+            continue
+        descendants.add(current)
+        children = sorted(outgoing.get(current, []))
+        stack.extend(target for _, _, target in reversed(children))
+
+    records, unreachable = dfs_records_with_pages(graph)
+    current_record = next((
+        record for record in records if record.get("page_name") == page_name
+    ), None)
+    branch_records = [
+        {
+            **record,
+            "display_name": dfs_record_display_name(
+                record,
+                str(record.get("page_name") or ""),
+            ),
+        }
+        for record in records
+        if record.get("page_name") in descendants
+    ]
+    if current_record:
+        current_record = {
+            **current_record,
+            "display_name": dfs_record_display_name(current_record, page_name),
+        }
+    return {
+        "page_name": page_name,
+        "display_name": (
+            current_record.get("display_name")
+            if isinstance(current_record, dict)
+            else page_description_leaf(page_name)
+        ),
+        "current_record": current_record,
+        "branch_records": branch_records,
+        "unreachable_pages": unreachable,
+    }
 
 
 class DfsPathExporter:

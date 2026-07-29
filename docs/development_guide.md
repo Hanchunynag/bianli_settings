@@ -9,7 +9,6 @@
 | `settings_ui_manual_recorder.py` | 设备动作、UI tree 解析、请求模型和导航图领域规则 |
 | `web_nav_server.py` | FastAPI 接口及录制、维护、删除流程的编排 |
 | `DFS.py` | 把导航图导出为紧凑 DFS 路径 JSON |
-| `create_demo_settings.py` | 生成本地演示数据 |
 | `templates/nav.html` | 页面结构 |
 | `static/nav.js` | 前端事件入口 |
 | `static/nav/render.js` | 页面渲染 |
@@ -121,12 +120,25 @@ api_record_action()
 - 从 `Pages_root` 开始；
 - 每个可达页面只访问一次；
 - 保留 transition 中的全部 steps；
+- `page_description` 按到达的页面层级生成，不使用同一跳转中的中间菜单步骤；
+- 页面 state 中存在 `dfs_manual` 时，四个 DFS 输出字段全部以人工记录为准；
 - 输出页面的 `special_operate`；
 - 报告不可达页面。
 
 非法或缺失的 transition `priority` 按 `1000` 兼容处理；任一端 state 不存在的悬空边不会生成虚假页面。
 
 页面节点使用入口上下文命名：根页面固定为 `Pages_root`，新页面按“父页面标题 + `to` + 当前标题”生成，例如从设置进入 WLAN 得到 `Pages_设置_toWLAN`。因此不同父页面下的同名页面会生成不同 `page_name`，不会仅因标题相同而合并。
+
+Web 页面详情中的“DFS 人工维护”用于修正无法可靠识别的标题或路径。人工记录保存在对应 state 的
+`dfs_manual` 中，字段严格为 `package_name`、`main_page_name`、`page_description` 和
+`path_snapshot`。页面描述与路径互不推导：`menu_grid` 等临时菜单动作应保留在路径中，但不写入页面描述。
+保存人工配置时同步更新 state 的 `page_description`；清除人工配置时恢复修改前的值。
+当页面只有一个入边时，还会把人工路径最后一步的 `key_description` 和 `step_prompt`
+同步到该 transition，避免 DFS 已显示“锁屏”而跳转详情仍显示旧的“7月24日”。
+“生成 DFS 精简文件”写入完整的 `settings_navigation_paths.json`，“查看当前页面 DFS 分支”展示
+当前页面及其所有可达后继页面的完整根路径。`a-b` 等包含连字符的页面名称属于合法描述，不得过滤。
+保存或清除 `dfs_manual` 后必须立即重新导出并覆盖 `settings_navigation_paths.json`，保证导航图、
+页面详情与后端精简结果始终一致。
 
 ## 4. 导航图格式
 
@@ -204,17 +216,11 @@ api_record_action()
 
 ## 6. 验证
 
-生成演示数据：
-
-```bash
-conda run -n hcy-env python create_demo_settings.py
-```
-
 检查 Python 语法：
 
 ```bash
 conda run -n hcy-env python -m py_compile \
-  web_nav_server.py settings_ui_manual_recorder.py DFS.py create_demo_settings.py
+  web_nav_server.py settings_ui_manual_recorder.py DFS.py
 ```
 
 运行删除与孤儿识别回归测试：
@@ -242,6 +248,12 @@ conda run -n hcy-env python DFS.py --work-dir demo_settings
 提交前至少确认：
 
 - `/api/state`、`/api/page_directory`、`/api/page_detail`、`/api/orphan_pages` 和 `/api/graph` 正常；
+- 页面详情可保存及清除 `dfs_manual`，重新导出后人工记录优先生效；
+- 页面详情可生成精简文件，并能查看当前页面及后继页面的 DFS 分支；
+- 目录、详情、顶部状态和 DFS 分支只显示 `page_description` 的页面末级名称，
+  不直接展示内部 `Pages_*` ID；
+- 修改父页面人工 DFS 后，下级人工记录的路径前缀和 `page_description`
+  前缀同步更新；
 - 页面跳转、同页变化、手势、弹窗四种记录仍可写入；
 - 删除预览不修改文件，预览与执行计划一致，正式删除会生成备份；
 - 普通删除不隐式删除孤儿页，孤儿页删除后列表会刷新；

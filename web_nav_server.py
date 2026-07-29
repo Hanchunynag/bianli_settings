@@ -58,6 +58,16 @@ from settings_ui_manual_recorder import (
     step_target,
     transition_id_for_pages,
 )
+from DFS import (
+    DFS_MANUAL_FIELD,
+    dfs_branch_for_page,
+    dfs_record_display_name,
+    dfs_record_for_page,
+    export_dfs_paths,
+    format_dfs_records,
+    format_path_target,
+    sync_descendant_manual_dfs_prefixes,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Settings Navigation Recorder")
@@ -182,6 +192,227 @@ def normalize_popup_type(value: Any) -> str:
         allowed = "、".join(POPUP_TYPES)
         raise ValueError(f"弹窗类型无效：{popup_type or '未指定'}；可选类型：{allowed}")
     return popup_type
+
+
+def page_display_description(
+    graph: Dict[str, Any],
+    page_name: str,
+) -> str:
+    state = graph.get("states", {}).get(page_name, {})
+    if not isinstance(state, dict):
+        return page_name
+    manual = state.get(DFS_MANUAL_FIELD)
+    display_record = manual if isinstance(manual, dict) else {
+        "page_description": (
+            state.get("page_description")
+            or state.get("last_title")
+            or ""
+        ),
+        "path_snapshot": [],
+    }
+    return dfs_record_display_name(
+        display_record,
+        page_name,
+    )
+
+
+def transition_with_descriptions(
+    graph: Dict[str, Any],
+    transition: Dict[str, Any],
+) -> Dict[str, Any]:
+    from_page = str(transition.get("from_page") or "")
+    to_page = str(transition.get("to_page") or "")
+    return {
+        **transition,
+        "from_page_description": page_display_description(graph, from_page),
+        "to_page_description": page_display_description(graph, to_page),
+    }
+
+
+def sync_single_incoming_transition_target(
+    graph: Dict[str, Any],
+    page_name: str,
+    manual_target: Dict[str, Any],
+) -> bool:
+    """Synchronize the final DFS step when the page has one unambiguous entry."""
+    incoming = [
+        transition
+        for transition in graph.get("transitions", [])
+        if isinstance(transition, dict)
+        and transition.get("to_page") == page_name
+    ]
+    if len(incoming) != 1:
+        return False
+
+    transition = incoming[0]
+    steps = transition.get("steps")
+    step_target_value: Optional[Dict[str, Any]] = None
+    if isinstance(steps, list) and steps:
+        last_step = steps[-1]
+        if isinstance(last_step, dict):
+            target = last_step.get("target")
+            if isinstance(target, dict):
+                step_target_value = target
+    if step_target_value is None:
+        target = transition.get("target")
+        if isinstance(target, dict):
+            step_target_value = target
+    if step_target_value is None:
+        return False
+
+    locator_type = str(manual_target.get("type") or "")
+    locator_value = manual_target.get("value")
+    if locator_type == "key":
+        step_target_value["key"] = locator_value
+    elif locator_type == "text":
+        step_target_value["text"] = locator_value
+    else:
+        return False
+    for field in ("key_description", "step_prompt"):
+        value = str(manual_target.get(field) or "").strip()
+        if value:
+            step_target_value[field] = value
+
+    # 单步 transition 的顶层 target 与 steps[0].target 是两份 JSON 时，
+    # 同步两处，保证旧数据和页面详情使用任何一种表示都能看到新描述。
+    if (
+        isinstance(steps, list)
+        and len(steps) == 1
+        and isinstance(transition.get("target"), dict)
+    ):
+        transition["target"].update(step_target_value)
+    return True
+
+
+def maintain_page_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Save or clear the exact DFS record maintained for one page."""
+    original_description_field = "dfs_original_page_description"
+    page_name = str(payload.get("page_name") or "").strip()
+    graph = config.graphs.load()
+    state = graph.get("states", {}).get(page_name)
+    if not isinstance(state, dict):
+        raise ValueError(f"页面不存在：{page_name}")
+    previous_record = dfs_record_for_page(graph, page_name) or {}
+    previous_path = previous_record.get("path_snapshot") or []
+    updated_descendant_pages: List[str] = []
+
+    if payload.get("clear"):
+        backup = config.graphs.backup()
+        state.pop(DFS_MANUAL_FIELD, None)
+        if original_description_field in state:
+            original_description = state.pop(original_description_field)
+            if original_description in (None, ""):
+                state.pop("page_description", None)
+            else:
+                state["page_description"] = original_description
+        message = "已恢复自动生成 DFS 数据。"
+    else:
+        package_name = str(payload.get("package_name") or "").strip()
+        main_page_name = str(payload.get("main_page_name") or "").strip()
+        page_description = str(payload.get("page_description") or "").strip()
+        if not package_name:
+            raise ValueError("package_name 不能为空")
+        if not main_page_name:
+            raise ValueError("main_page_name 不能为空")
+        if not page_description:
+            raise ValueError("page_description 不能为空")
+        raw_path = payload.get("path_snapshot")
+        if not isinstance(raw_path, list):
+            raise ValueError("path_snapshot 必须是 JSON 数组")
+        path_snapshot = []
+        for index, target in enumerate(raw_path, start=1):
+            formatted = format_path_target(target)
+            if not formatted:
+                raise ValueError(
+                    f"path_snapshot 第 {index} 步无效：type 只能是 key/text，且 value 不能为空"
+                )
+            path_snapshot.append(formatted)
+        root_page = str(
+            graph.get("traversal_config", {}).get("root_page") or "Pages_root"
+        )
+        if page_name == root_page and path_snapshot:
+            raise ValueError("根页面 path_snapshot 必须为空")
+        if page_name != root_page and not path_snapshot:
+            raise ValueError("非根页面 path_snapshot 至少需要一个定位步骤")
+        backup = config.graphs.backup()
+        if DFS_MANUAL_FIELD not in state:
+            state[original_description_field] = state.get("page_description")
+        state[DFS_MANUAL_FIELD] = {
+            "package_name": package_name,
+            "main_page_name": main_page_name,
+            "page_description": page_description,
+            "path_snapshot": path_snapshot,
+        }
+        state["page_description"] = page_description
+        transition_synced = sync_single_incoming_transition_target(
+            graph,
+            page_name,
+            path_snapshot[-1] if path_snapshot else {},
+        ) if page_name != root_page else False
+        updated_descendant_pages = sync_descendant_manual_dfs_prefixes(
+            graph,
+            page_name,
+            previous_path,
+            path_snapshot,
+            str(previous_record.get("page_description") or ""),
+            page_description,
+        )
+        descendant_message = (
+            f"，并级联更新 {len(updated_descendant_pages)} 个下级页面的人工 DFS 路径"
+            if updated_descendant_pages
+            else ""
+        )
+        message = (
+            f"已保存 DFS 人工维护数据，并同步当前页面唯一入边的目标描述"
+            f"{descendant_message}。"
+            if transition_synced
+            else f"已保存 DFS 人工维护数据{descendant_message}；"
+            "后续导出将优先使用该记录。"
+        )
+
+    config.graphs.save(graph)
+    compact_result = export_compact_dfs({})
+    return {
+        "page_name": page_name,
+        "dfs_record": dfs_record_for_page(graph, page_name),
+        "dfs_manual": state.get(DFS_MANUAL_FIELD),
+        "graph_backup": backup,
+        "output_path": compact_result["output_path"],
+        "record_count": compact_result["record_count"],
+        "unreachable_pages": compact_result["unreachable_pages"],
+        "updated_descendant_pages": updated_descendant_pages,
+        "message": (
+            f"{message} 已同步更新 settings_navigation_paths.json，"
+            f"共 {compact_result['record_count']} 条路径。"
+        ),
+    }
+
+
+def export_compact_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate the complete compact DFS file from the current graph."""
+    graph = config.graphs.load()
+    root_page = str(
+        graph.get("traversal_config", {}).get("root_page") or "Pages_root"
+    )
+    records, unreachable = export_dfs_paths(graph, root_page)
+    output = format_dfs_records(records, graph)
+    output_path = (
+        config.work_dir
+        / "outputs"
+        / "navigation"
+        / "settings_navigation_paths.json"
+    )
+    save_json(output, output_path, "DFS 精简路径")
+    page_name = str(payload.get("page_name") or "").strip()
+    result: Dict[str, Any] = {
+        "output_path": str(output_path),
+        "record_count": len(output),
+        "unreachable_pages": unreachable,
+        "message": f"DFS 精简完成，共生成 {len(output)} 条页面路径。",
+    }
+    if page_name:
+        result["dfs_detail"] = dfs_branch_for_page(graph, page_name)
+    return result
 
 
 def record_page_operation(
@@ -524,6 +755,10 @@ def api_console_action(req: ActionRequest) -> JSONResponse:
             ordered_transition_ids=persisted_order,
             message=f"已保存 {parent_page} 的页面顺序，重新生成 DFS 时自动生效。",
         )
+    if action == "maintain_page_dfs":
+        return ok_response(**maintain_page_dfs(payload))
+    if action == "export_dfs_compact":
+        return ok_response(**export_compact_dfs(payload))
     if action == "continue_current_page":
         current = read_current_state(capture=True)
         graph = config.graphs.load()
@@ -688,7 +923,7 @@ def api_rename_page(req: RenamePageRequest) -> JSONResponse:
         page_name=new_name, old_page_name=old_name,
         new_title=state.get("last_title") or state.get("page_description") or new_name,
         backup=backup, migrated_files=migrated_files,
-        message=f"已重命名页面：{old_name} -> {new_name}",
+        message=f"已修改内部页面 ID：{old_name} -> {new_name}",
     )
 
 @app.get("/api/page_detail")
@@ -698,15 +933,40 @@ def api_page_detail(page_name: str) -> JSONResponse:
     if not isinstance(state, dict):
         raise ValueError(f"页面不存在：{page_name}")
     transitions = graph.get("transitions", [])
+    dfs_record = dfs_record_for_page(graph, page_name) or {
+        "package_name": str(graph.get("package_name") or ""),
+        "main_page_name": str(graph.get("main_page_name") or ""),
+        "page_description": str(
+            state.get("last_title") or state.get("page_description") or page_name
+        ),
+        "path_snapshot": [],
+    }
     return ok_response(
-        page_name=page_name, state=state,
-        incoming_transitions=[item for item in transitions if item.get("to_page") == page_name],
-        outgoing_transitions=[item for item in transitions if item.get("from_page") == page_name],
+        page_name=page_name,
+        display_name=dfs_record_display_name(dfs_record, page_name),
+        state=state,
+        incoming_transitions=[
+            transition_with_descriptions(graph, item)
+            for item in transitions
+            if item.get("to_page") == page_name
+        ],
+        outgoing_transitions=[
+            transition_with_descriptions(graph, item)
+            for item in transitions
+            if item.get("from_page") == page_name
+        ],
         merged_candidates=get_page_merged_candidates(graph, page_name, []),
         page_operations=state.get("page_operations", []) or [],
         page_variants=state.get("page_variants", []) or [],
         continued_captures=state.get("continued_captures", []) or [],
+        dfs_record=dfs_record,
+        dfs_manual=state.get(DFS_MANUAL_FIELD),
     )
+
+
+@app.get("/api/page_dfs_detail")
+def api_page_dfs_detail(page_name: str) -> JSONResponse:
+    return ok_response(**dfs_branch_for_page(config.graphs.load(), page_name))
 
 
 @app.get("/api/orphan_pages")

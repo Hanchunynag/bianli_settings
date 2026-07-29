@@ -1414,6 +1414,50 @@ def build_page_directory(graph: Dict[str, Any]) -> Dict[str, Any]:
     states = navigation.states
     outgoing = navigation.ordered_outgoing()
 
+    def local_page_label(value: Any) -> str:
+        label = str(value or "").strip()
+        if label.startswith("Pages_"):
+            label = label.removeprefix("Pages_")
+        for separator in ("_to", " to"):
+            if separator in label:
+                label = label.rsplit(separator, 1)[-1].strip()
+        if "_" in label:
+            label = label.rsplit("_", 1)[-1].strip()
+        return label
+
+    def page_title(page: str, state: Any) -> str:
+        if not isinstance(state, dict):
+            return local_page_label(page) or page
+        manual = state.get("dfs_manual")
+        if isinstance(manual, dict):
+            manual_description = local_page_label(manual.get("page_description"))
+            if manual_description and any(
+                char.isalnum() or "\u4e00" <= char <= "\u9fff"
+                for char in manual_description
+            ):
+                return manual_description
+            for target in reversed(manual.get("path_snapshot") or []):
+                if not isinstance(target, dict):
+                    continue
+                label = str(
+                    target.get("step_prompt")
+                    or target.get("key_description")
+                    or target.get("text")
+                    or target.get("value")
+                    or target.get("key")
+                    or ""
+                ).strip()
+                if label:
+                    return label
+        for value in (
+            state.get("page_description"),
+            state.get("last_title"),
+            page,
+        ):
+            if label := local_page_label(value):
+                return label
+        return page
+
     def node(page: str, seen: Set[str]) -> Dict[str, Any]:
         st = states.get(page, {})
         children = []
@@ -1458,11 +1502,11 @@ def build_page_directory(graph: Dict[str, Any]) -> Dict[str, Any]:
                 "steps": steps,
             }
             children.append({**node(child, seen | {child}), "via": via})
-        title = str(st.get("last_title") or st.get("page_description") or page)
+        title = page_title(page, st)
         return {"page_name": page, "title": title, "children": children}
     flat = []
     for page, st in states.items():
-        title = str(st.get("last_title") or st.get("page_description") or page)
+        title = page_title(page, st)
         flat.append({
             "page_name": page,
             "title": title,

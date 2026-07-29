@@ -1,12 +1,16 @@
 import copy
-import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from create_demo_settings import build_large_settings_graph, node, themes_tree
-from DFS import DfsPathExporter
+from DFS import (
+    DfsPathExporter,
+    dfs_branch_for_page,
+    format_dfs_records,
+    is_human_description,
+    sync_descendant_manual_dfs_prefixes,
+)
 from settings_ui_manual_recorder import (
     DeleteActionRequest,
     GraphMaintenance,
@@ -48,6 +52,34 @@ def transition(tid, source, target):
     return {"transition_id": tid, "from_page": source, "to_page": target}
 
 
+def node(node_type, key="", text="", bounds="[0,0][0,0]", clickable=False, children=None, **extra):
+    attrs = {
+        "type": node_type,
+        "key": key,
+        "text": text,
+        "bounds": bounds,
+        "visible": "true",
+        "enabled": "true",
+    }
+    if clickable:
+        attrs["clickable"] = "true"
+    attrs.update({key: value for key, value in extra.items() if value not in (None, "")})
+    return {"attributes": attrs, "children": children or []}
+
+
+def title_page_tree():
+    return node("Root", bounds="[0,0][1080,2400]", children=[
+        node("NavDestination", key="settings.themes", bounds="[0,0][1080,2400]", children=[
+            node("TitleBar", bounds="[0,0][1080,180]", children=[
+                node("Button", key="nav.back", text="返回", bounds="[24,64][112,152]", clickable=True),
+                node("Text", key="page.title_id", text="主题", bounds="[128,72][360,144]"),
+            ]),
+            node("Column", key="theme.current.card", text="晨雾主题", clickable=True, bounds="[96,260][984,1240]"),
+            node("ListItem", key="theme.store.entry", text="更多主题", clickable=True, bounds="[96,1320][984,1480]"),
+        ]),
+    ])
+
+
 def hdc_page(title, entry_text, entry_key=""):
     return node("Root", bounds="[0,0][1080,2400]", children=[
         node("NavDestination", bounds="[0,0][1080,2400]", children=[
@@ -62,6 +94,84 @@ def hdc_page(title, entry_text, entry_key=""):
 
 
 class GraphMaintenanceTest(unittest.TestCase):
+    def test_manual_dfs_path_change_cascades_to_descendant_prefixes(self):
+        old_second_step = {
+            "type": "key",
+            "value": "LockScreenClock",
+            "key_description": "7月24日",
+            "step_prompt": "7月24日",
+        }
+        new_second_step = {
+            "type": "key",
+            "value": "LockScreenClock",
+            "key_description": "锁屏",
+            "step_prompt": "锁屏",
+        }
+        first_step = {
+            "type": "key",
+            "value": "theme_settings",
+            "key_description": "桌面和个性化",
+            "step_prompt": "桌面和个性化",
+        }
+        child_step = {
+            "type": "key",
+            "value": "wallpaper",
+            "key_description": "壁纸",
+            "step_prompt": "壁纸",
+        }
+        graph = {
+            "states": {
+                "Pages_root": state("设置"),
+                "Pages_lock": state("锁屏"),
+                "Pages_wallpaper": {
+                    **state("壁纸"),
+                    "dfs_manual": {
+                        "package_name": "com.example.settings",
+                        "main_page_name": "MainAbility",
+                        "page_description": "桌面和个性化_7月24日_壁纸",
+                        "path_snapshot": [first_step, old_second_step, child_step],
+                    },
+                },
+                "Pages_other": {
+                    **state("其他"),
+                    "dfs_manual": {
+                        "package_name": "com.example.settings",
+                        "main_page_name": "MainAbility",
+                        "page_description": "其他",
+                        "path_snapshot": [child_step],
+                    },
+                },
+            },
+            "transitions": [
+                transition("root-lock", "Pages_root", "Pages_lock"),
+                transition("lock-wallpaper", "Pages_lock", "Pages_wallpaper"),
+                transition("root-other", "Pages_root", "Pages_other"),
+            ],
+        }
+
+        updated = sync_descendant_manual_dfs_prefixes(
+            graph,
+            "Pages_lock",
+            [first_step, old_second_step],
+            [first_step, new_second_step],
+            "桌面和个性化_7月24日",
+            "桌面和个性化_锁屏",
+        )
+
+        self.assertEqual(updated, ["Pages_wallpaper"])
+        self.assertEqual(
+            graph["states"]["Pages_wallpaper"]["dfs_manual"]["path_snapshot"],
+            [first_step, new_second_step, child_step],
+        )
+        self.assertEqual(
+            graph["states"]["Pages_wallpaper"]["dfs_manual"]["page_description"],
+            "桌面和个性化_锁屏_壁纸",
+        )
+        self.assertEqual(
+            graph["states"]["Pages_other"]["dfs_manual"]["path_snapshot"],
+            [child_step],
+        )
+
     def test_navigation_graph_rename_updates_every_structural_reference(self):
         graph = {
             "main_page_name": "Pages_old",
@@ -146,6 +256,357 @@ class GraphMaintenanceTest(unittest.TestCase):
             directory["items"][0]["children"][0]["via"]["priority"], 1000,
         )
 
+    def test_dfs_description_uses_pages_not_intermediate_menu_steps(self):
+        graph = {
+            "package_name": "com.huawei.hmos.settings",
+            "main_page_name": "com.huawei.hmos.settings.MainAbility",
+            "states": {
+                "Pages_root": state("设置"),
+                "Pages_device": state("Mate X5"),
+                "Pages_update": state("检查更新"),
+                "Pages_update_options": state(":"),
+            },
+            "transitions": [
+                {
+                    **transition("root-device", "Pages_root", "Pages_device"),
+                    "target": {"key": "about_device", "step_prompt": "Mate X5"},
+                },
+                {
+                    **transition("device-update", "Pages_device", "Pages_update"),
+                    "target": {
+                        "key": "DoubleButtonContainer_SINGLE_BOTTOM_2",
+                        "step_prompt": "检查更新",
+                    },
+                },
+                {
+                    **transition("update-options", "Pages_update", "Pages_update_options"),
+                    "steps": [
+                        {"target": {"key": "menu_grid", "step_prompt": "menu_grid"}},
+                        {
+                            "target": {
+                                "key": "SettingMenu_MenuItem_0",
+                                "step_prompt": "更新选项",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+
+        records = DfsPathExporter(graph, "Pages_root").build()
+        options = records[-1]
+
+        self.assertEqual(
+            options["page_description"],
+            "Mate X5_检查更新_更新选项",
+        )
+        self.assertEqual(
+            [target["key"] for target in options["path_snapshot"]],
+            [
+                "about_device",
+                "DoubleButtonContainer_SINGLE_BOTTOM_2",
+                "menu_grid",
+                "SettingMenu_MenuItem_0",
+            ],
+        )
+
+    def test_frontend_page_names_use_only_the_local_dfs_step(self):
+        graph = {
+            "package_name": "pkg",
+            "main_page_name": "Main",
+            "traversal_config": {"root_page": "Pages_root"},
+            "states": {
+                "Pages_root": state("设置"),
+                "Pages_设置_to关于本机": {
+                    **state("设置_to关于本机"),
+                    "page_description": "设置_关于本机",
+                    "dfs_manual": {
+                        "package_name": "pkg",
+                        "main_page_name": "Main",
+                        "page_description": "设置_关于本机",
+                        "path_snapshot": [{
+                            "type": "key",
+                            "value": "about_device",
+                            "key_description": "关于本机",
+                            "step_prompt": "关于本机",
+                        }],
+                    },
+                },
+            },
+            "transitions": [{
+                **transition(
+                    "root-about",
+                    "Pages_root",
+                    "Pages_设置_to关于本机",
+                ),
+                "target": {
+                    "key": "about_device",
+                    "step_prompt": "关于本机",
+                },
+            }],
+        }
+
+        directory = build_page_directory(graph)
+        branch = dfs_branch_for_page(graph, "Pages_设置_to关于本机")
+
+        self.assertEqual(directory["items"][0]["title"], "设置")
+        self.assertEqual(
+            directory["items"][0]["children"][0]["title"],
+            "关于本机",
+        )
+        self.assertEqual(branch["display_name"], "关于本机")
+        self.assertEqual(
+            branch["branch_records"][0]["display_name"],
+            "关于本机",
+        )
+
+    def test_manual_parent_name_controls_generated_descendant_description(self):
+        first = {
+            "type": "key",
+            "value": "LockScreenClock",
+            "key_description": "锁屏",
+            "step_prompt": "锁屏",
+        }
+        graph = {
+            "package_name": "pkg",
+            "main_page_name": "Main",
+            "traversal_config": {"root_page": "Pages_root"},
+            "states": {
+                "Pages_root": state("设置"),
+                "Pages_lock": {
+                    **state("7月24日"),
+                    "dfs_manual": {
+                        "package_name": "pkg",
+                        "main_page_name": "Main",
+                        "page_description": "锁屏",
+                        "path_snapshot": [first],
+                    },
+                },
+                "Pages_wallpaper": state("壁纸"),
+            },
+            "transitions": [
+                {
+                    **transition("root-lock", "Pages_root", "Pages_lock"),
+                    "target": {
+                        "key": "LockScreenClock",
+                        "step_prompt": "锁屏",
+                    },
+                },
+                {
+                    **transition(
+                        "lock-wallpaper",
+                        "Pages_lock",
+                        "Pages_wallpaper",
+                    ),
+                    "target": {
+                        "key": "wallpaper",
+                        "step_prompt": "壁纸",
+                    },
+                },
+            ],
+        }
+
+        records = DfsPathExporter(graph, "Pages_root").build()
+
+        self.assertEqual(records[1]["page_description"], "锁屏_壁纸")
+
+    def test_dfs_keeps_hyphenated_page_names(self):
+        self.assertTrue(is_human_description("a-b"))
+        self.assertFalse(is_human_description("entry_font_style_page"))
+        graph = {
+            "package_name": "pkg",
+            "main_page_name": "main",
+            "states": {
+                "Pages_root": state("设置"),
+                "Pages_a-b": state("a-b"),
+            },
+            "transitions": [{
+                **transition("root-a-b", "Pages_root", "Pages_a-b"),
+                "target": {"key": "open_a_b", "step_prompt": "a-b"},
+            }],
+        }
+
+        records = DfsPathExporter(graph, "Pages_root").build()
+
+        self.assertEqual(records[0]["page_description"], "a-b")
+
+    def test_dfs_branch_contains_current_page_and_descendants_only(self):
+        graph = {
+            "package_name": "pkg",
+            "main_page_name": "main",
+            "states": {
+                "Pages_root": state("设置"),
+                "Pages_a": state("页面 A"),
+                "Pages_a_child": state("A 子页面"),
+                "Pages_b": state("页面 B"),
+            },
+            "transitions": [
+                {
+                    **transition("root-a", "Pages_root", "Pages_a"),
+                    "target": {"key": "open_a", "step_prompt": "页面 A"},
+                },
+                {
+                    **transition("a-child", "Pages_a", "Pages_a_child"),
+                    "target": {"key": "open_child", "step_prompt": "A 子页面"},
+                },
+                {
+                    **transition("root-b", "Pages_root", "Pages_b"),
+                    "target": {"key": "open_b", "step_prompt": "页面 B"},
+                },
+            ],
+        }
+
+        detail = dfs_branch_for_page(graph, "Pages_a")
+
+        self.assertEqual(detail["current_record"]["page_name"], "Pages_a")
+        self.assertEqual(
+            [record["page_name"] for record in detail["branch_records"]],
+            ["Pages_a", "Pages_a_child"],
+        )
+        self.assertEqual(
+            [step["value"] for step in detail["branch_records"][1]["path_snapshot"]],
+            ["open_a", "open_child"],
+        )
+
+    def test_dfs_manual_record_overrides_unreliable_generated_data(self):
+        graph = {
+            "package_name": "com.huawei.hmos.settings",
+            "main_page_name": "com.huawei.hmos.settings.MainAbility",
+            "states": {
+                "Pages_root": state("设置"),
+                "Pages_font": {
+                    **state(":"),
+                    "dfs_manual": {
+                        "package_name": "com.huawei.hmos.settings",
+                        "main_page_name": "com.huawei.hmos.settings.MainAbility",
+                        "page_description": "桌面和个性化_字体样式",
+                        "path_snapshot": [
+                            {
+                                "type": "key",
+                                "value": "theme_settings",
+                                "key_description": "桌面和个性化",
+                                "step_prompt": "桌面和个性化",
+                            },
+                            {
+                                "type": "key",
+                                "value": "entry_font_style_page",
+                                "key_description": "字体样式",
+                                "step_prompt": "字体样式",
+                            },
+                        ],
+                    },
+                },
+            },
+            "transitions": [{
+                **transition("root-font", "Pages_root", "Pages_font"),
+                "target": {"key": "entry_font_style_page"},
+            }],
+        }
+
+        output = format_dfs_records(
+            DfsPathExporter(graph, "Pages_root").build(),
+            graph,
+        )
+        directory = build_page_directory(graph)
+
+        self.assertEqual(output[1], graph["states"]["Pages_font"]["dfs_manual"])
+        self.assertEqual(
+            directory["items"][0]["children"][0]["title"],
+            "字体样式",
+        )
+
+    @unittest.skipIf(web_nav_server is None, "FastAPI dependency is not installed")
+    def test_web_dfs_maintenance_saves_and_clears_manual_record(self):
+        graph = {
+            "package_name": "com.huawei.hmos.settings",
+            "main_page_name": "com.huawei.hmos.settings.MainAbility",
+            "states": {
+                "Pages_root": state("设置"),
+                "Pages_font": state(":"),
+            },
+            "transitions": [{
+                **transition("root-font", "Pages_root", "Pages_font"),
+                "target": {"key": "entry_font_style_page"},
+            }],
+        }
+        manual = {
+            "page_name": "Pages_font",
+            "package_name": "com.huawei.hmos.settings",
+            "main_page_name": "com.huawei.hmos.settings.MainAbility",
+            "page_description": "桌面和个性化_字体样式",
+            "path_snapshot": [{
+                "type": "key",
+                "value": "entry_font_style_page",
+                "key_description": "字体样式",
+                "step_prompt": "字体样式",
+            }],
+        }
+        original_config = web_nav_server.config
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                repository = NavigationGraphRepository(Path(temp_dir))
+                repository.save(graph)
+                web_nav_server.config = web_nav_server.ServerConfig(Path(temp_dir))
+
+                saved = web_nav_server.maintain_page_dfs(manual)
+                self.assertEqual(
+                    saved["dfs_record"]["page_description"],
+                    "桌面和个性化_字体样式",
+                )
+                self.assertEqual(
+                    repository.load()["states"]["Pages_font"]["dfs_manual"],
+                    {key: manual[key] for key in (
+                        "package_name",
+                        "main_page_name",
+                        "page_description",
+                        "path_snapshot",
+                    )},
+                )
+                self.assertEqual(
+                    repository.load()["states"]["Pages_font"]["page_description"],
+                    "桌面和个性化_字体样式",
+                )
+                self.assertEqual(
+                    repository.load()["transitions"][0]["target"]["step_prompt"],
+                    "字体样式",
+                )
+                self.assertEqual(
+                    repository.load()["transitions"][0]["target"]["key_description"],
+                    "字体样式",
+                )
+                paths_path = (
+                    Path(temp_dir)
+                    / "outputs"
+                    / "navigation"
+                    / "settings_navigation_paths.json"
+                )
+                self.assertTrue(paths_path.exists())
+                compact_paths = json.loads(paths_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    compact_paths[1]["page_description"],
+                    "桌面和个性化_字体样式",
+                )
+                self.assertEqual(
+                    compact_paths[1]["path_snapshot"],
+                    manual["path_snapshot"],
+                )
+
+                cleared = web_nav_server.maintain_page_dfs({
+                    "page_name": "Pages_font",
+                    "clear": True,
+                })
+                self.assertIsNone(cleared["dfs_manual"])
+                self.assertNotIn(
+                    "dfs_manual",
+                    repository.load()["states"]["Pages_font"],
+                )
+                self.assertNotIn(
+                    "page_description",
+                    repository.load()["states"]["Pages_font"],
+                )
+        finally:
+            web_nav_server.config = original_config
+
     def test_graph_backups_are_unique_even_when_created_immediately(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repository = NavigationGraphRepository(Path(temp_dir))
@@ -217,7 +678,7 @@ class GraphMaintenanceTest(unittest.TestCase):
         )
         self.assertEqual(
             [item["page_description"] for item in dfs],
-            ["C", "A alternate", "B"],
+            ["C", "A", "B"],
         )
 
     def test_reorder_rejects_partial_duplicate_or_foreign_transition_sets(self):
@@ -465,26 +926,8 @@ class GraphMaintenanceTest(unittest.TestCase):
             self.assertEqual(len(saved["transitions"]), 1)
             self.assertEqual(saved["transitions"][0]["transition_id"], "Pages_root__to__Pages_display")
 
-    def test_demo_and_dfs_output_stay_compatible(self):
-        graph, active_page = build_large_settings_graph()
-        output = DfsPathExporter(graph, "Pages_root").build()
-        digest = hashlib.sha256(json.dumps(
-            output,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()).hexdigest()
-
-        self.assertEqual((len(graph["states"]), len(graph["transitions"]), len(output)), (181, 180, 180))
-        self.assertEqual(
-            len({(item["from_page"], item["to_page"]) for item in graph["transitions"]}),
-            len(graph["transitions"]),
-        )
-        self.assertIn(active_page, graph["states"])
-        self.assertEqual(digest, "b4aa023328c5331c6a0b0604442ab5f9c826b7a69152f1f7deadb2e95216d799")
-
-    def test_demo_ui_candidate_extraction_stays_compatible(self):
-        root = themes_tree()
+    def test_ui_candidate_extraction_stays_compatible(self):
+        root = title_page_tree()
         annotate(root)
         candidates = extract_navigation_candidates(root)
 
@@ -494,7 +937,7 @@ class GraphMaintenanceTest(unittest.TestCase):
         )
 
     def test_title_bar_back_button_does_not_override_explicit_page_title(self):
-        root = themes_tree()
+        root = title_page_tree()
         annotate(root)
 
         detected = build_navigation_state(root)

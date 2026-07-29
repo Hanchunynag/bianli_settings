@@ -7,6 +7,14 @@ let directoryDrag = null;
 let directoryClickBlocked = false;
 let directoryRequestGeneration = 0;
 
+function localDescription(value) {
+  let label = String(value || '').trim().replace(/^Pages_/, '');
+  if (label.includes('_to')) label = label.split('_to').at(-1).trim();
+  if (label.includes(' to')) label = label.split(' to').at(-1).trim();
+  if (label.includes('_')) label = label.split('_').at(-1).trim();
+  return label;
+}
+
 function finishDirectoryDrag() {
   if (directoryDrag?.row) directoryDrag.row.style.opacity = '';
   directoryDrag = null;
@@ -77,13 +85,18 @@ export function render(data) {
   if (!data) return;
   store.data = data;
 
-  el('pageName').textContent = data.state?.page_name || '-';
-  el('activePage').textContent = data.active_page || data.active_state?.page_name || '-';
-  el('title').textContent = data.state?.last_title || '-';
+  el('title').textContent = localDescription(
+    data.active_state?.page_description
+    || data.active_state?.last_title
+    || data.state?.page_description
+    || data.state?.last_title
+    || data.active_page
+    || data.state?.page_name,
+  ) || '-';
   el('pending').textContent = data.pending_action_chain?.steps?.length
-    ? `${data.pending_action_chain.from_page} 已记录 ${data.pending_action_chain.steps.length} 步`
+    ? `${localDescription(data.pending_action_chain.from_page)} 已记录 ${data.pending_action_chain.steps.length} 步`
     : data.pending
-      ? `${data.pending.from_page} -> ${(data.pending.target || {}).step_prompt || (data.pending.target || {}).value || ''}`
+      ? `${localDescription(data.pending.from_page)} → ${(data.pending.target || {}).step_prompt || (data.pending.target || {}).value || ''}`
       : '无';
 
   el('warning').textContent = data.warning || '';
@@ -166,20 +179,13 @@ function renderDirectory(data) {
     row.className = 'dirNode';
     row.style.setProperty('--depth', String(Math.min(depth, 8)));
     const title = node.title || node.page_name;
-    const viaLabel = node.via?.target_label || '';
-    const normalizedVia = String(viaLabel).replace(/\s+/g, '').toLowerCase();
-    const normalizedTitle = String(title).replace(/\s+/g, '').toLowerCase();
-    const showVia = node.via && (node.via.step_count > 1 || normalizedVia !== normalizedTitle);
-    const via = showVia ? escapeHtml(node.via.step_count > 1 ? `${node.via.step_count} 步` : viaLabel) : '';
     row.innerHTML = `
       <div class="dirMain${expandable ? ' isExpandable' : ''}" ${expandable ? `role="button" tabindex="0" aria-expanded="${expanded}"` : ''}>
         <span class="dirCaret${expandable ? '' : ' isLeaf'}" aria-hidden="true">${expandable ? (expanded ? '−' : '+') : ''}</span>
         <div class="dirContent">
           <div class="dirTitle">
             <strong>${escapeHtml(title)}</strong>
-            ${via ? `<span class="dirVia">${via}</span>` : ''}
           </div>
-          <code>${escapeHtml(node.page_name)}</code>
         </div>
       </div>
       <div class="dirActions"></div>
@@ -233,22 +239,101 @@ async function loadPageDetail(pageName) {
   const operations = data.page_operations || [];
   const variants = data.page_variants || [];
   const captures = data.continued_captures || [];
+  const dfsRecord = data.dfs_manual || data.dfs_record || {
+    package_name: '',
+    main_page_name: '',
+    page_description: '',
+    path_snapshot: [],
+  };
+  const dfsIsManual = Boolean(data.dfs_manual);
+  const recordDisplayName = (record) => {
+    const description = localDescription(record?.page_description);
+    if (description) return description;
+    const targets = [...(record?.path_snapshot || [])].reverse();
+    for (const target of targets) {
+      const label = target.step_prompt || target.key_description || target.text || target.value || target.key;
+      if (String(label || '').trim()) return String(label).trim();
+    }
+    return localDescription(record?.page_name);
+  };
+  const currentDescription = data.display_name
+    || recordDisplayName(dfsRecord)
+    || localDescription(data.state?.page_description)
+    || localDescription(data.state?.last_title)
+    || data.page_name;
   const detailJson = { ...data };
   delete detailJson.ok;
+  const showDfsDetail = (detail) => {
+    const detailBox = box.querySelector('#dfsBranchDetail');
+    const records = detail?.branch_records || [];
+    const currentPage = detail?.page_name || data.page_name;
+    detailBox.innerHTML = `
+      <div class="dfsBranchHeader">
+        <strong>当前页面：${escapeHtml(detail?.display_name || currentDescription)}</strong>
+        <span>${records.length} 个 DFS 分支页面</span>
+      </div>
+      ${records.length ? records.map((record) => `
+        <article class="dfsRecordCard${record.page_name === currentPage ? ' isCurrent' : ''}">
+          <div class="dfsRecordHeading">
+            <strong>${escapeHtml(record.display_name || recordDisplayName(record))}</strong>
+            ${record.page_name === currentPage ? '<span class="statusBadge isManual">当前页面</span>' : ''}
+          </div>
+          <ol>
+            ${(record.path_snapshot || []).map((target) => `
+              <li>
+                <span>${escapeHtml(target.step_prompt || target.key_description || target.value || '')}</span>
+                <code>${escapeHtml(`${target.type || ''}=${target.value || ''}`)}</code>
+              </li>`).join('') || '<li class="muted">根页面，无需点击</li>'}
+          </ol>
+        </article>`).join('') : '<div class="muted">当前页面没有可展示的 DFS 记录。</div>'}
+    `;
+    detailBox.classList.remove('hidden');
+  };
   const renderTransitions = (title, transitions) => `
     <h4>${title}</h4>${transitions.length ? transitions.map((transition) => `
       <div class="transitionRow">
         <div class="transitionMain">
-          <strong>${escapeHtml(`${transition.from_page} -> ${transition.to_page}`)}</strong>
+          <strong>${escapeHtml(`${transition.from_page_description || transition.from_page} → ${transition.to_page_description || transition.to_page}`)}</strong>
           <ol>${transitionSteps(transition).map((step) => `<li>${escapeHtml(stepLabel(step))}</li>`).join('')}</ol>
         </div>
         <button class="danger" data-action="delete-transition" data-id="${escapeHtml(transition.transition_id || '')}">删除跳转</button>
       </div>`).join('') : '<div class="muted">无</div>'}`;
   box.innerHTML = `
-    <h3>${escapeHtml(data.state?.last_title || data.page_name)}</h3>
-    <p><code>${escapeHtml(data.page_name)}</code></p>
-    <button class="secondary" data-action="rename">重命名页面</button>
+    <h3>${escapeHtml(currentDescription)}</h3>
+    ${data.page_name !== 'Pages_root' ? '<button class="secondary" data-action="rename">修改内部页面 ID</button>' : ''}
     <button class="secondary" data-action="json">查看本页 JSON</button>
+    <section class="dfsEditor">
+      <div class="dfsEditorTitle">
+        <h4>当前页面 DFS 维护</h4>
+        <span class="statusBadge ${dfsIsManual ? 'isManual' : ''}">${dfsIsManual ? '人工配置' : '自动生成'}</span>
+      </div>
+      <p class="muted">page_description 保存完整 DFS 路径描述，前端只显示最后一个页面名称；path_snapshot 保存实际点击步骤。menu_grid 等中间操作不会作为页面名称展示。</p>
+      <form id="dfsManualForm">
+        <label>
+          <span>package_name</span>
+          <input name="package_name" value="${escapeHtml(dfsRecord.package_name || '')}" required />
+        </label>
+        <label>
+          <span>main_page_name</span>
+          <input name="main_page_name" value="${escapeHtml(dfsRecord.main_page_name || '')}" required />
+        </label>
+        <label>
+          <span>page_description（可直接修改）</span>
+          <input name="page_description" value="${escapeHtml(dfsRecord.page_description || '')}" required />
+        </label>
+        <label>
+          <span>path_snapshot（JSON 数组）</span>
+          <textarea name="path_snapshot" rows="12" spellcheck="false">${escapeHtml(JSON.stringify(dfsRecord.path_snapshot || [], null, 2))}</textarea>
+        </label>
+        <div class="dfsEditorActions">
+          <button class="primary" type="submit">保存 page_description / DFS 数据</button>
+          <button class="secondary" type="button" data-action="export-dfs">生成 DFS 精简文件</button>
+          <button class="secondary" type="button" data-action="view-dfs">查看当前页面 DFS 分支</button>
+          ${dfsIsManual ? '<button class="secondary" type="button" data-action="reset-dfs">恢复自动生成</button>' : ''}
+        </div>
+      </form>
+      <div id="dfsBranchDetail" class="dfsBranchDetail hidden"></div>
+    </section>
     ${renderTransitions('从哪些页面可以进来', data.incoming_transitions || [])}
     ${renderTransitions('从当前页面可以去哪里', data.outgoing_transitions || [])}
     <h4>页面内操作</h4>
@@ -275,6 +360,34 @@ async function loadPageDetail(pageName) {
         <button class="secondary" data-action="delete-capture" data-id="${escapeHtml(capture.capture_id || '')}">删除该次续录</button>
         <button class="danger" data-action="delete-capture-candidates" data-id="${escapeHtml(capture.capture_id || '')}">删除该次续录及其候选控件</button>
       </div>`).join('') : '<div class="muted">无</div>'}`;
+  const dfsForm = box.querySelector('#dfsManualForm');
+  dfsForm.onsubmit = async (event) => {
+    event.preventDefault();
+    let pathSnapshot;
+    try {
+      pathSnapshot = JSON.parse(dfsForm.elements.path_snapshot.value || '[]');
+      if (!Array.isArray(pathSnapshot)) throw new Error('必须是 JSON 数组');
+    } catch (error) {
+      el('error').textContent = `path_snapshot 格式错误：${error.message}`;
+      el('error').classList.remove('hidden');
+      return;
+    }
+    const result = await postJson('/api/console_action', {
+      action: 'maintain_page_dfs',
+      payload: {
+        page_name: data.page_name,
+        package_name: dfsForm.elements.package_name.value,
+        main_page_name: dfsForm.elements.main_page_name.value,
+        page_description: dfsForm.elements.page_description.value,
+        path_snapshot: pathSnapshot,
+      },
+    });
+    if (!result) return;
+    await refreshDirectory();
+    await loadPageDetail(data.page_name);
+    el('overlayStatus').textContent = result.message;
+    el('overlayStatus').classList.remove('hidden');
+  };
   box.onclick = async (event) => {
     const button = event.target.closest('button[data-action]');
     if (!button) return;
@@ -289,7 +402,33 @@ async function loadPageDetail(pageName) {
       dryRunDelete('transition', { transition_id: button.dataset.id });
     } else if (action === 'delete-operation') {
       dryRunDelete('page_operation', { page_name: data.page_name, operation_id: button.dataset.id, delete_revealed_candidates: false });
-    } else {
+    } else if (action === 'view-dfs') {
+      const detail = await api(`/api/page_dfs_detail?page_name=${encodeURIComponent(data.page_name)}`);
+      if (detail?.ok) showDfsDetail(detail);
+    } else if (action === 'export-dfs') {
+      const result = await postJson('/api/console_action', {
+        action: 'export_dfs_compact',
+        payload: { page_name: data.page_name },
+      });
+      if (!result) return;
+      if (result.dfs_detail) showDfsDetail(result.dfs_detail);
+      el('overlayStatus').textContent = `${result.message} 保存位置：${result.output_path}`;
+      el('overlayStatus').classList.remove('hidden');
+    } else if (action === 'reset-dfs') {
+      if (!confirm('确认删除本页人工 DFS 配置并恢复自动生成？')) return;
+      const result = await postJson('/api/console_action', {
+        action: 'maintain_page_dfs',
+        payload: {
+          page_name: data.page_name,
+          clear: true,
+        },
+      });
+      if (!result) return;
+      await refreshDirectory();
+      await loadPageDetail(data.page_name);
+      el('overlayStatus').textContent = result.message;
+      el('overlayStatus').classList.remove('hidden');
+    } else if (action === 'delete-capture' || action === 'delete-capture-candidates') {
       dryRunDelete('continued_capture', {
         page_name: data.page_name,
         capture_id: button.dataset.id,
@@ -301,30 +440,26 @@ async function loadPageDetail(pageName) {
 
 async function renamePage(data) {
   const currentName = data.page_name || '';
-  const currentTitle = data.state?.last_title || data.state?.page_description || currentName;
-  const newName = window.prompt('新的 page_name（必须以 Pages_ 开头）', currentName);
+  const newName = window.prompt(
+    '修改后端内部 page_name（必须以 Pages_ 开头，不会改变前端显示名称）',
+    currentName,
+  );
   if (newName === null) return;
-  const newTitle = window.prompt('新的页面显示标题', currentTitle);
-  if (newTitle === null) return;
   const result = await postJson('/api/rename_page', {
     old_page_name: currentName,
     new_page_name: newName.trim(),
-    new_title: newTitle.trim(),
+    new_title: '',
   });
   if (!result) return;
   if (store.data?.state?.page_name === currentName) {
     store.data.state.page_name = result.page_name;
-    store.data.state.last_title = result.new_title || newTitle.trim() || result.page_name;
-    el('pageName').textContent = store.data.state.page_name;
-    el('title').textContent = store.data.state.last_title;
   }
   if (store.data?.active_page === currentName) {
     store.data.active_page = result.page_name;
-    el('activePage').textContent = result.page_name;
   }
   await refreshDirectory();
   await loadPageDetail(result.page_name);
-  el('overlayStatus').textContent = result.message || '页面已重命名';
+  el('overlayStatus').textContent = result.message || '内部页面 ID 已修改';
   el('overlayStatus').classList.remove('hidden');
 }
 
