@@ -59,6 +59,8 @@ from settings_ui_manual_recorder import (
     transition_id_for_pages,
 )
 
+from DFS import DFS_OVERRIDE_FIELD, build_page_dfs_preview, normalize_dfs_override
+
 APP_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Settings Navigation Recorder")
 POPUP_TYPES = ("SheetWrapper", "Dialog", "MenuWrapper")
@@ -480,6 +482,29 @@ def index() -> FileResponse:
 def api_console_action(req: ActionRequest) -> JSONResponse:
     action = req.action.strip()
     payload = req.payload or {}
+    if action in {"save_dfs_override", "reset_dfs_override"}:
+        page_name = str(payload.get("page_name") or "").strip()
+        if not page_name:
+            raise ValueError("page_name 不能为空")
+        graph = config.graphs.load()
+        state = graph.get("states", {}).get(page_name)
+        if not isinstance(state, dict):
+            raise ValueError(f"页面不存在：{page_name}")
+        reset = action == "reset_dfs_override"
+        normalized = None if reset else normalize_dfs_override(payload.get("record"))
+        backup = config.graphs.backup()
+        if reset:
+            state.pop(DFS_OVERRIDE_FIELD, None)
+            message = f"已恢复 {page_name} 的自动 DFS 数据"
+        else:
+            state[DFS_OVERRIDE_FIELD] = normalized
+            message = f"已保存 {page_name} 的 DFS 人工维护数据"
+        config.graphs.save(graph)
+        return ok_response(
+            **build_page_dfs_preview(graph, page_name),
+            graph_backup=backup,
+            message=message,
+        )
     if action == "capture_current":
         return ok_response(**read_current_state(capture=True))
     if action == "system_back":
@@ -707,6 +732,12 @@ def api_page_detail(page_name: str) -> JSONResponse:
         page_variants=state.get("page_variants", []) or [],
         continued_captures=state.get("continued_captures", []) or [],
     )
+
+
+@app.get("/api/dfs_record")
+def api_dfs_record(page_name: str) -> JSONResponse:
+    graph = config.graphs.load()
+    return ok_response(**build_page_dfs_preview(graph, page_name.strip()))
 
 
 @app.get("/api/orphan_pages")
