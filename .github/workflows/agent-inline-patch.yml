@@ -1,0 +1,92 @@
+name: Agent inline source patch
+
+on:
+  push:
+    branches:
+      - agent/manual-dfs-maintenance
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: github.event.head_commit.message == 'Apply inline source patches'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/manual-dfs-maintenance
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Patch existing source files
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          recorder = Path('settings_ui_manual_recorder.py')
+          text = recorder.read_text(encoding='utf-8')
+          old = 'DEFAULT_WORK_DIR = Path("demo_settings")'
+          new = 'DEFAULT_WORK_DIR = Path("settings_workspace")'
+          if old not in text:
+              raise SystemExit('DEFAULT_WORK_DIR patch anchor not found')
+          recorder.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          server = Path('web_nav_server.py')
+          text = server.read_text(encoding='utf-8')
+          import_anchor = ')\n\nAPP_DIR = Path(__file__).resolve().parent'
+          import_replacement = ')\n\nfrom DFS import DFS_OVERRIDE_FIELD, build_page_dfs_preview, normalize_dfs_override\n\nAPP_DIR = Path(__file__).resolve().parent'
+          if import_anchor not in text:
+              raise SystemExit('web server import anchor not found')
+          text = text.replace(import_anchor, import_replacement, 1)
+
+          action_anchor = '''    action = req.action.strip()\n    payload = req.payload or {}\n    if action == "capture_current":\n'''
+          action_replacement = '''    action = req.action.strip()\n    payload = req.payload or {}\n    if action in {"save_dfs_override", "reset_dfs_override"}:\n        page_name = str(payload.get("page_name") or "").strip()\n        if not page_name:\n            raise ValueError("page_name 不能为空")\n        graph = config.graphs.load()\n        state = graph.get("states", {}).get(page_name)\n        if not isinstance(state, dict):\n            raise ValueError(f"页面不存在：{page_name}")\n        reset = action == "reset_dfs_override"\n        normalized = None if reset else normalize_dfs_override(payload.get("record"))\n        backup = config.graphs.backup()\n        if reset:\n            state.pop(DFS_OVERRIDE_FIELD, None)\n            message = f"已恢复 {page_name} 的自动 DFS 数据"\n        else:\n            state[DFS_OVERRIDE_FIELD] = normalized\n            message = f"已保存 {page_name} 的 DFS 人工维护数据"\n        config.graphs.save(graph)\n        return ok_response(\n            **build_page_dfs_preview(graph, page_name),\n            graph_backup=backup,\n            message=message,\n        )\n    if action == "capture_current":\n'''
+          if action_anchor not in text:
+              raise SystemExit('web server action anchor not found')
+          text = text.replace(action_anchor, action_replacement, 1)
+
+          route_anchor = '''\n\n@app.get("/api/orphan_pages")\ndef api_orphan_pages() -> JSONResponse:\n'''
+          route_replacement = '''\n\n@app.get("/api/dfs_record")\ndef api_dfs_record(page_name: str) -> JSONResponse:\n    graph = config.graphs.load()\n    return ok_response(**build_page_dfs_preview(graph, page_name.strip()))\n\n\n@app.get("/api/orphan_pages")\ndef api_orphan_pages() -> JSONResponse:\n'''
+          if route_anchor not in text:
+              raise SystemExit('web server route anchor not found')
+          server.write_text(text.replace(route_anchor, route_replacement, 1), encoding='utf-8')
+
+          tests = Path('test_graph_maintenance.py')
+          text = tests.read_text(encoding='utf-8')
+          old_import = 'from create_demo_settings import build_large_settings_graph, node, themes_tree'
+          new_import = 'from test_ui_fixtures import node, themes_tree'
+          if old_import not in text:
+              raise SystemExit('test fixture import anchor not found')
+          text = text.replace(old_import, new_import, 1)
+          start = text.find('    def test_demo_and_dfs_output_stay_compatible(self):\n')
+          end = text.find('    def test_demo_ui_candidate_extraction_stays_compatible(self):\n')
+          if start < 0 or end < 0 or end <= start:
+              raise SystemExit('demo acceptance test anchors not found')
+          text = text[:start] + text[end:]
+          text = text.replace(
+              '    def test_demo_ui_candidate_extraction_stays_compatible(self):\n',
+              '    def test_theme_ui_candidate_extraction_stays_compatible(self):\n',
+              1,
+          )
+          tests.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run regression tests
+        run: |
+          python -m py_compile web_nav_server.py settings_ui_manual_recorder.py DFS.py
+          python -m unittest -v test_dfs_locator_format.py test_dfs_manual_override.py test_graph_maintenance.py test_popup_operations.py
+
+      - name: Commit patched sources
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add settings_ui_manual_recorder.py web_nav_server.py test_graph_maintenance.py
+          git commit -m "Integrate DFS maintenance into main server"
+          git push
