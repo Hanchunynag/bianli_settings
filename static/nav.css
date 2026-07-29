@@ -419,11 +419,52 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 
 .dirNode {
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
+  align-items: center;
+  height: 46px;
   min-height: 46px;
   padding: 7px 8px;
+  border-bottom: 0;
   border-radius: 6px;
-  overflow: hidden;
+  overflow: visible;
+}
+
+.dirTreeItem {
+  position: relative;
+  min-width: 0;
+}
+
+.directory > .dirTreeItem + .dirTreeItem {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.dirChildren {
+  display: grid;
+  gap: 2px;
+  margin-left: 16px;
+  padding-left: 18px;
+  border-left: 1px solid #aeb8c6;
+}
+
+.dirChildren > .dirTreeItem::before {
+  content: "";
+  position: absolute;
+  top: 22px;
+  left: -18px;
+  width: 14px;
+  z-index: 1;
+  border-top: 1px solid #aeb8c6;
+}
+
+.dirChildren > .dirTreeItem:last-child::after {
+  content: "";
+  position: absolute;
+  top: 23px;
+  bottom: 0;
+  left: -19px;
+  width: 2px;
+  background: var(--panel);
 }
 
 .reachableRow:hover,
@@ -447,7 +488,6 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   align-items: start;
   min-width: 0;
   overflow: hidden;
-  padding-left: calc(var(--depth, 0) * 14px);
 }
 
 .dirMain.isExpandable {
@@ -466,19 +506,17 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   justify-content: center;
   width: 16px;
   height: 16px;
-  border: 1px solid #9bb8e5;
-  border-radius: 3px;
-  background: var(--primary-soft);
-  color: var(--primary);
-  font-size: 13px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
   font-weight: 700;
   line-height: 1;
   user-select: none;
 }
 
 .dirCaret.isLeaf {
-  border-color: transparent;
-  background: transparent;
+  visibility: hidden;
 }
 
 .dirContent {
@@ -515,31 +553,79 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 
 .dirActions {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px;
   align-items: center;
   justify-content: flex-end;
+  position: relative;
+  white-space: nowrap;
 }
 
-.dirActions .danger {
+.dirMore {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.dirMore summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dirMore summary::-webkit-details-marker {
   display: none;
 }
 
-.dirNode:hover .dirActions .danger,
-.dirNode:focus-within .dirActions .danger {
-  display: inline-block;
+.dirMore[open] summary,
+.dirMore summary:hover {
+  border-color: #aeb8c6;
+  background: var(--line-soft);
+  color: var(--text);
 }
 
-.dirNode:hover .dirMain,
-.dirNode:focus-within .dirMain {
-  grid-column: 1 / -1;
-  grid-row: 1;
+.dirActionMenu {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 2px;
+  min-width: 112px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: 0 8px 22px rgba(24, 34, 51, .16);
 }
 
-.dirNode:hover .dirActions,
-.dirNode:focus-within .dirActions {
-  grid-column: 1 / -1;
-  grid-row: 2;
+.dirActionMenu button {
+  width: 100%;
+  min-height: 30px;
+  border: 0;
+  padding: 5px 8px;
+  background: transparent;
+  text-align: left;
+}
+
+.dirActionMenu button.danger {
+  border: 0;
+  background: transparent;
+  color: var(--danger);
+}
+
+.dirActionMenu button:hover {
+  background: var(--line-soft);
 }
 
 button.compact {

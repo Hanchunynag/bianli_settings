@@ -66,6 +66,7 @@ from DFS import (
     export_dfs_paths,
     format_dfs_records,
     format_path_target,
+    replace_navigation_target_locator,
     sync_descendant_manual_dfs_prefixes,
 )
 
@@ -260,18 +261,8 @@ def sync_single_incoming_transition_target(
     if step_target_value is None:
         return False
 
-    locator_type = str(manual_target.get("type") or "")
-    locator_value = manual_target.get("value")
-    if locator_type == "key":
-        step_target_value["key"] = locator_value
-    elif locator_type == "text":
-        step_target_value["text"] = locator_value
-    else:
+    if not replace_navigation_target_locator(step_target_value, manual_target):
         return False
-    for field in ("key_description", "step_prompt"):
-        value = str(manual_target.get(field) or "").strip()
-        if value:
-            step_target_value[field] = value
 
     # 单步 transition 的顶层 target 与 steps[0].target 是两份 JSON 时，
     # 同步两处，保证旧数据和页面详情使用任何一种表示都能看到新描述。
@@ -279,8 +270,9 @@ def sync_single_incoming_transition_target(
         isinstance(steps, list)
         and len(steps) == 1
         and isinstance(transition.get("target"), dict)
+        and transition["target"] is not step_target_value
     ):
-        transition["target"].update(step_target_value)
+        replace_navigation_target_locator(transition["target"], manual_target)
     return True
 
 

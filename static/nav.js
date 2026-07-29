@@ -1,7 +1,7 @@
 import { api, postJson } from './nav/api.js';
 import { el } from './nav/dom.js';
 import { store } from './nav/state.js';
-import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=page-names-8';
+import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=directory-menu-10';
 
 const popupTypeButtons = [...document.querySelectorAll('[data-popup-type]')];
 const popupTypes = new Set(popupTypeButtons.map((button) => button.dataset.popupType));

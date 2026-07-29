@@ -9,6 +9,7 @@ from DFS import (
     dfs_branch_for_page,
     format_dfs_records,
     is_human_description,
+    replace_navigation_target_locator,
     sync_descendant_manual_dfs_prefixes,
 )
 from settings_ui_manual_recorder import (
@@ -94,6 +95,110 @@ def hdc_page(title, entry_text, entry_key=""):
 
 
 class GraphMaintenanceTest(unittest.TestCase):
+    def test_directory_hover_keeps_fixed_layout_and_uses_overflow_menu(self):
+        project_dir = Path(__file__).resolve().parent
+        css = (project_dir / "static" / "nav.css").read_text(encoding="utf-8")
+        render_js = (
+            project_dir / "static" / "nav" / "render.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("height: 46px;", css)
+        self.assertIn(".dirActionMenu {", css)
+        self.assertIn("position: absolute;", css)
+        self.assertNotIn(".dirNode:hover .dirMain", css)
+        self.assertNotIn(".dirNode:hover .dirActions", css)
+        self.assertIn('<details class="dirMore">', render_js)
+        self.assertLess(
+            render_js.index('<details class="dirMore">'),
+            render_js.index('data-action="detail">详情</button>'),
+        )
+
+    def test_key_locator_is_replaced_by_text_without_stale_key(self):
+        target = {
+            "type": "key",
+            "value": "old_key",
+            "key": "old_key",
+            "text": "旧文字",
+            "key_description": "旧页面",
+            "step_prompt": "旧页面",
+        }
+
+        replaced = replace_navigation_target_locator(target, {
+            "type": "text",
+            "value": "新文字",
+            "key_description": "新页面",
+            "step_prompt": "新页面",
+        })
+
+        self.assertTrue(replaced)
+        self.assertEqual(target["text"], "新文字")
+        self.assertEqual(target["key_description"], "新页面")
+        self.assertEqual(target["step_prompt"], "新页面")
+        self.assertNotIn("key", target)
+        self.assertNotIn("type", target)
+        self.assertNotIn("value", target)
+
+    def test_stale_descendant_key_is_repaired_after_parent_changed_to_text(self):
+        parent_step = {
+            "type": "key",
+            "value": "theme_settings",
+            "key_description": "桌面和个性化",
+            "step_prompt": "桌面和个性化",
+        }
+        stale_key_step = {
+            "type": "key",
+            "value": "LockScreenClock",
+            "key_description": "锁屏",
+            "step_prompt": "锁屏",
+        }
+        current_text_step = {
+            "type": "text",
+            "value": "锁屏与息屏显示",
+            "key_description": "锁屏",
+            "step_prompt": "锁屏",
+        }
+        child_step = {
+            "type": "key",
+            "value": "wallpaper",
+            "key_description": "壁纸",
+            "step_prompt": "壁纸",
+        }
+        graph = {
+            "states": {
+                "Pages_root": state("设置"),
+                "Pages_lock": state("锁屏"),
+                "Pages_wallpaper": {
+                    **state("壁纸"),
+                    "dfs_manual": {
+                        "package_name": "pkg",
+                        "main_page_name": "Main",
+                        "page_description": "桌面和个性化_锁屏_壁纸",
+                        "path_snapshot": [
+                            parent_step,
+                            stale_key_step,
+                            child_step,
+                        ],
+                    },
+                },
+            },
+            "transitions": [
+                transition("root-lock", "Pages_root", "Pages_lock"),
+                transition("lock-wallpaper", "Pages_lock", "Pages_wallpaper"),
+            ],
+        }
+
+        updated = sync_descendant_manual_dfs_prefixes(
+            graph,
+            "Pages_lock",
+            [parent_step, current_text_step],
+            [parent_step, current_text_step],
+        )
+
+        self.assertEqual(updated, ["Pages_wallpaper"])
+        repaired = graph["states"]["Pages_wallpaper"]["dfs_manual"]["path_snapshot"]
+        self.assertEqual(repaired[1], current_text_step)
+        self.assertEqual(repaired[2], child_step)
+
     def test_manual_dfs_path_change_cascades_to_descendant_prefixes(self):
         old_second_step = {
             "type": "key",

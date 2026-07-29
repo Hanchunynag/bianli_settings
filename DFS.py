@@ -120,6 +120,31 @@ def format_path_target(target: Any) -> Target:
     return formatted
 
 
+def replace_navigation_target_locator(
+    target: Any,
+    manual_target: Any,
+) -> bool:
+    """Replace a transition target's key/text locator without stale fallback."""
+    if not isinstance(target, dict):
+        return False
+    formatted = format_path_target(manual_target)
+    locator_type = str(formatted.get("type") or "")
+    locator_value = formatted.get("value")
+    if locator_type not in {"key", "text"}:
+        return False
+
+    target.pop("text" if locator_type == "key" else "key", None)
+    if str(target.get("type") or "") in {"key", "text"}:
+        target.pop("type", None)
+        target.pop("value", None)
+    target[locator_type] = locator_value
+    for field in ("key_description", "step_prompt"):
+        value = str(formatted.get(field) or "").strip()
+        if value:
+            target[field] = value
+    return True
+
+
 def is_human_description(value: Any) -> bool:
     """Return whether a label is suitable for a user-facing page description."""
     label = str(value or "").strip()
@@ -238,9 +263,11 @@ def sync_descendant_manual_dfs_prefixes(
 ) -> List[str]:
     """Replace one page's old DFS prefix in every manual descendant record.
 
-    Descendant matching follows the navigation graph, while prefix matching
-    uses only the locator ``type`` and ``value``.  This allows descriptions to
-    be repaired even when the descendant still contains the old labels.
+    Descendant matching follows the navigation graph.  Normally the complete
+    old locator prefix must match.  When the current page's final locator was
+    previously left stale (for example key -> text), the shared ancestor
+    prefix is enough to repair that current-page step in structural
+    descendants.
     """
     states = graph.get("states")
     if not isinstance(states, dict) or page_name not in states:
@@ -298,10 +325,16 @@ def sync_descendant_manual_dfs_prefixes(
         ]
         if len(manual_path) < len(old_prefix):
             continue
-        if not all(
+        full_prefix_matches = all(
             same_locator(manual_path[index], old_prefix[index])
             for index in range(len(old_prefix))
-        ):
+        )
+        ancestor_prefix_length = len(old_prefix) - 1
+        ancestor_prefix_matches = all(
+            same_locator(manual_path[index], old_prefix[index])
+            for index in range(ancestor_prefix_length)
+        )
+        if not full_prefix_matches and not ancestor_prefix_matches:
             continue
         manual["path_snapshot"] = [
             *(dict(target) for target in new_prefix),

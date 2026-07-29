@@ -168,20 +168,27 @@ function renderDirectory(data) {
   let shown = 0;
   const total = roots.reduce((sum, node) => sum + totalCount(node), 0);
 
-  const addNode = (node, depth = 0, parentPage = '__root__', siblings = roots) => {
+  const addNode = (
+    node,
+    depth = 0,
+    parentPage = '__root__',
+    siblings = roots,
+    container = box,
+  ) => {
     if (!matchesQuery(node)) return;
     shown += 1;
     const rawChildren = node.children || [];
     const children = [...rawChildren].filter(matchesQuery);
     const expandable = children.length > 0;
     const expanded = expandable && (Boolean(query) || store.expandedPages.has(node.page_name));
+    const treeItem = document.createElement('div');
+    treeItem.className = `dirTreeItem${depth === 0 ? ' isRoot' : ''}`;
     const row = document.createElement('div');
     row.className = 'dirNode';
-    row.style.setProperty('--depth', String(Math.min(depth, 8)));
     const title = node.title || node.page_name;
     row.innerHTML = `
       <div class="dirMain${expandable ? ' isExpandable' : ''}" ${expandable ? `role="button" tabindex="0" aria-expanded="${expanded}"` : ''}>
-        <span class="dirCaret${expandable ? '' : ' isLeaf'}" aria-hidden="true">${expandable ? (expanded ? '−' : '+') : ''}</span>
+        <span class="dirCaret${expandable ? '' : ' isLeaf'}" aria-hidden="true">${expandable ? (expanded ? '▾' : '▸') : ''}</span>
         <div class="dirContent">
           <div class="dirTitle">
             <strong>${escapeHtml(title)}</strong>
@@ -210,18 +217,50 @@ function renderDirectory(data) {
     }
 
     const actions = row.querySelector('.dirActions');
+    const hasMoreActions = Boolean(
+      node.via?.transition_id || node.page_name !== 'Pages_root',
+    );
     actions.innerHTML = `
-      <button class="secondary compact" data-action="detail">详情</button>
-      ${node.via?.transition_id ? '<button class="danger compact" data-action="branch">删分支</button>' : ''}
-      ${node.page_name !== 'Pages_root' ? '<button class="danger compact" data-action="page">删页</button>' : ''}`;
+      ${hasMoreActions ? `
+        <details class="dirMore">
+          <summary title="更多操作" aria-label="更多操作">⋯</summary>
+          <div class="dirActionMenu">
+            ${node.via?.transition_id ? '<button class="danger" data-action="branch">删除分支</button>' : ''}
+            ${node.page_name !== 'Pages_root' ? '<button class="danger" data-action="page">删除页面</button>' : ''}
+          </div>
+        </details>` : ''}
+      <button class="secondary compact" data-action="detail">详情</button>`;
+    const more = actions.querySelector('.dirMore');
+    if (more) {
+      more.ontoggle = () => {
+        if (!more.open) return;
+        box.querySelectorAll('.dirMore[open]').forEach((other) => {
+          if (other !== more) other.removeAttribute('open');
+        });
+      };
+    }
     actions.onclick = (event) => {
-      const action = event.target.dataset.action;
+      const action = event.target.closest('[data-action]')?.dataset.action;
+      if (!action) return;
+      more?.removeAttribute('open');
       if (action === 'detail') loadPageDetail(node.page_name);
       else if (action === 'branch') dryRunDelete('branch', { transition_id: node.via.transition_id, delete_descendants: true });
       else if (action === 'page') dryRunDelete('page', { page_name: node.page_name });
     };
-    box.appendChild(row);
-    if (expanded) children.forEach((child) => addNode(child, depth + 1, node.page_name, rawChildren));
+    treeItem.appendChild(row);
+    container.appendChild(treeItem);
+    if (expanded) {
+      const childContainer = document.createElement('div');
+      childContainer.className = 'dirChildren';
+      treeItem.appendChild(childContainer);
+      children.forEach((child) => addNode(
+        child,
+        depth + 1,
+        node.page_name,
+        rawChildren,
+        childContainer,
+      ));
+    }
   };
 
   [...roots].forEach((node) => addNode(node));
