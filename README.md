@@ -10,8 +10,7 @@
 ## 文件结构
 
 ```text
-settings_web_console.py            Web 控制台正式入口，包含 DFS 人工维护接口
-web_nav_server.py                  原有录制、查询和图维护服务
+web_nav_server.py                  Web 控制台服务，包含 DFS 人工维护接口
 settings_ui_manual_recorder.py     UI tree、导航图、clickable 控件提取工具
 DFS.py                             DFS 路径导出与页面级覆盖规则
 static/dfs_manual.js               页面详情中的 DFS 人工维护面板
@@ -35,7 +34,7 @@ docs/development_guide.md
 ## 启动 Web 控制台
 
 ```bash
-conda run -n hcy-env python settings_web_console.py \
+conda run -n hcy-env python web_nav_server.py \
   --work-dir settings_workspace \
   --output-dir settings_workspace/outputs/latest \
   --host 127.0.0.1 \
@@ -89,6 +88,8 @@ outputs/navigation/settings_navigation_graph.json
 ```
 
 `page_description` 与 `path_snapshot` 独立。`menu_grid` 等中间操作可以留在实际 DFS 点击路径中，但不需要出现在页面描述中。人工数据保存到对应 state 的 `dfs_override`；“清除人工覆盖”会恢复自动生成结果。
+
+保存和清除人工覆盖都会先备份导航图。人工数据只影响最终 DFS 导出，不修改页面父子关系、transition 或实际录制路径。
 
 ## DFS 导出
 
