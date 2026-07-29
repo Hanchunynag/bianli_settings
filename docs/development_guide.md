@@ -6,8 +6,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `settings_web_console.py` | 正式 Web 入口；在原服务上增加 DFS 人工维护接口 |
-| `web_nav_server.py` | FastAPI 录制、查询、删除及图维护流程 |
+| `web_nav_server.py` | FastAPI 录制、查询、删除、图维护及 DFS 人工维护接口 |
 | `settings_ui_manual_recorder.py` | 设备动作、UI tree 解析、请求模型和导航图领域规则 |
 | `DFS.py` | 导出紧凑 DFS 路径，并解析页面级 `dfs_override` |
 | `templates/nav.html` | 页面结构 |
@@ -42,24 +41,25 @@
 使用：
 
 ```bash
-python settings_web_console.py \
+python web_nav_server.py \
   --work-dir settings_workspace \
   --output-dir settings_workspace/outputs/latest \
   --host 127.0.0.1 \
   --port 8020
 ```
 
-`settings_web_console.py` 复用 `web_nav_server.app` 和 `ServerConfig`，只增加：
+DFS 人工维护直接集成在原服务中：
 
 ```text
 GET  /api/dfs_record
-POST /api/dfs_override
+POST /api/console_action
+     action=save_dfs_override
+     action=reset_dfs_override
 ```
 
-原录制接口仍由 `web_nav_server.py` 提供：
+其他主要接口：
 
 ```text
-/api/console_action
 /api/record_action
 /api/delete_action
 /api/page_directory
@@ -67,6 +67,8 @@ POST /api/dfs_override
 /api/orphan_pages
 /api/graph
 ```
+
+人工保存和清除沿用 `/api/console_action`，不增加只转发一层的独立写入路由。
 
 ## 4. 录制领域层
 
@@ -208,7 +210,7 @@ priority -> transition 原始记录顺序
 
 ```bash
 python -m py_compile \
-  settings_web_console.py web_nav_server.py settings_ui_manual_recorder.py DFS.py
+  web_nav_server.py settings_ui_manual_recorder.py DFS.py
 ```
 
 运行回归测试：
