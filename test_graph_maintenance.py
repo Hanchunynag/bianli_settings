@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from create_demo_settings import build_large_settings_graph, node, themes_tree
+from test_ui_fixtures import node, themes_tree
 from DFS import DfsPathExporter
 from settings_ui_manual_recorder import (
     DeleteActionRequest,
@@ -465,25 +465,7 @@ class GraphMaintenanceTest(unittest.TestCase):
             self.assertEqual(len(saved["transitions"]), 1)
             self.assertEqual(saved["transitions"][0]["transition_id"], "Pages_root__to__Pages_display")
 
-    def test_demo_and_dfs_output_stay_compatible(self):
-        graph, active_page = build_large_settings_graph()
-        output = DfsPathExporter(graph, "Pages_root").build()
-        digest = hashlib.sha256(json.dumps(
-            output,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()).hexdigest()
-
-        self.assertEqual((len(graph["states"]), len(graph["transitions"]), len(output)), (181, 180, 180))
-        self.assertEqual(
-            len({(item["from_page"], item["to_page"]) for item in graph["transitions"]}),
-            len(graph["transitions"]),
-        )
-        self.assertIn(active_page, graph["states"])
-        self.assertEqual(digest, "b4aa023328c5331c6a0b0604442ab5f9c826b7a69152f1f7deadb2e95216d799")
-
-    def test_demo_ui_candidate_extraction_stays_compatible(self):
+    def test_theme_ui_candidate_extraction_stays_compatible(self):
         root = themes_tree()
         annotate(root)
         candidates = extract_navigation_candidates(root)
