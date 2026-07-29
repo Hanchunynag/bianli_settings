@@ -27,7 +27,7 @@ from pydantic import BaseModel
 Node = Dict[str, Any]
 
 DEFAULT_DEVICE_ID = "68Q0223918000004"
-DEFAULT_WORK_DIR = Path("demo_settings")
+DEFAULT_WORK_DIR = Path("settings_workspace")
 PACKAGE_NAME = "com.huawei.hmos.settings"
 MAIN_PAGE_NAME = "com.huawei.hmos.settings.MainAbility"
 

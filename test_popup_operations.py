@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import web_nav_server
-from create_demo_settings import node
+from test_ui_fixtures import node
 from settings_ui_manual_recorder import (
     annotate,
     build_navigation_state,
