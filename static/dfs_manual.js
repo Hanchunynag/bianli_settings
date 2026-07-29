@@ -4,6 +4,7 @@ const detailBox = document.getElementById('pageDetail');
 let requestGeneration = 0;
 
 function currentPageName() {
+  if (!detailBox.querySelector('button[data-action="rename"]')) return '';
   return [...detailBox.querySelectorAll('code')]
     .map((node) => node.textContent.trim())
     .find((value) => value.startsWith('Pages_')) || '';
