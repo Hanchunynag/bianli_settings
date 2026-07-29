@@ -3,19 +3,20 @@ name: Agent inline source patch
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    branches: [main]
+    branches:
+      - agent/manual-dfs-maintenance
 
 permissions:
   contents: write
 
 jobs:
   patch-and-test:
-    if: github.head_ref == 'agent/manual-dfs-maintenance'
+    if: github.head_ref == 'agent/manual-dfs-maintenance-patch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: agent/manual-dfs-maintenance
+          ref: ${{ github.head_ref }}
 
       - uses: actions/setup-python@v5
         with:
