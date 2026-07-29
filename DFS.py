@@ -28,7 +28,6 @@ TARGET_FIELDS = (
     "expect",
 )
 
-
 DFS_RECORD_FIELDS = (
     "package_name",
     "main_page_name",
@@ -42,6 +41,8 @@ DFS_TARGET_FIELDS = (
     "key_description",
     "step_prompt",
 )
+
+DFS_OVERRIDE_FIELD = "dfs_override"
 
 
 def safe_priority(value: Any, default: int = 1000) -> int:
@@ -117,6 +118,17 @@ def format_path_target(target: Any) -> Target:
     return formatted
 
 
+def format_path_snapshot(path_snapshot: Any) -> List[Target]:
+    """Return a validated compact locator list and silently skip bad legacy rows."""
+    if not isinstance(path_snapshot, list):
+        return []
+    return [
+        formatted
+        for target in path_snapshot
+        if (formatted := format_path_target(target))
+    ]
+
+
 def root_dfs_record(graph: Graph, records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Build the root-page record whose navigation path is intentionally empty."""
     states = graph.get("states")
@@ -141,6 +153,7 @@ def root_dfs_record(graph: Graph, records: List[Dict[str, Any]]) -> Optional[Dic
         or root_page
     ).strip()
     return {
+        "page_name": root_page,
         "package_name": str(
             graph.get("package_name")
             or first_record.get("package_name")
@@ -156,30 +169,77 @@ def root_dfs_record(graph: Graph, records: List[Dict[str, Any]]) -> Optional[Dic
     }
 
 
+def format_dfs_record(
+    record: Dict[str, Any],
+    graph: Graph,
+    *,
+    apply_override: bool = True,
+) -> Dict[str, Any]:
+    """Format one DFS record and optionally apply its page-level manual override."""
+    automatic = {
+        "package_name": str(record.get("package_name") or graph.get("package_name") or ""),
+        "main_page_name": str(record.get("main_page_name") or graph.get("main_page_name") or ""),
+        "page_description": str(record.get("page_description") or ""),
+        "path_snapshot": format_path_snapshot(record.get("path_snapshot") or []),
+    }
+    if not apply_override:
+        return automatic
+
+    page_name = str(record.get("page_name") or "")
+    state = graph.get("states", {}).get(page_name, {}) if page_name else {}
+    override = state.get(DFS_OVERRIDE_FIELD) if isinstance(state, dict) else None
+    if not isinstance(override, dict):
+        return automatic
+
+    resolved = dict(automatic)
+    for field in ("package_name", "main_page_name", "page_description"):
+        value = override.get(field)
+        if isinstance(value, str) and value.strip():
+            resolved[field] = value.strip()
+    if isinstance(override.get("path_snapshot"), list):
+        resolved["path_snapshot"] = format_path_snapshot(override["path_snapshot"])
+    return resolved
+
+
+def normalize_dfs_override(record: Any) -> Dict[str, Any]:
+    """Validate and normalize a page-level manual DFS record before persistence."""
+    if not isinstance(record, dict):
+        raise ValueError("DFS 人工维护内容必须是 JSON 对象")
+
+    normalized: Dict[str, Any] = {}
+    for field in ("package_name", "main_page_name", "page_description"):
+        value = record.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} 不能为空")
+        normalized[field] = value.strip()
+
+    path_snapshot = record.get("path_snapshot")
+    if not isinstance(path_snapshot, list):
+        raise ValueError("path_snapshot 必须是数组")
+    normalized_steps: List[Target] = []
+    for index, target in enumerate(path_snapshot, start=1):
+        formatted = format_path_target(target)
+        if not formatted:
+            raise ValueError(
+                f"path_snapshot 第 {index} 步缺少可用的 key/text 定位信息"
+            )
+        normalized_steps.append(formatted)
+    normalized["path_snapshot"] = normalized_steps
+    return normalized
+
+
 def format_dfs_records(records: List[Dict[str, Any]], graph: Graph) -> List[Dict[str, Any]]:
     """Return only the fixed compact fields allowed in DFS output JSON.
 
     The root page is emitted first with an empty ``path_snapshot`` because no
-    tap is required to reach the application's initial page.
+    tap is required to reach the application's initial page. A state-level
+    ``dfs_override`` replaces the resolved record without changing graph edges.
     """
-    formatted_records: List[Dict[str, Any]] = []
+    raw_records: List[Dict[str, Any]] = []
     if root_record := root_dfs_record(graph, records):
-        formatted_records.append(root_record)
-
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        formatted_records.append({
-            "package_name": str(record.get("package_name") or ""),
-            "main_page_name": str(record.get("main_page_name") or ""),
-            "page_description": str(record.get("page_description") or ""),
-            "path_snapshot": [
-                formatted_target
-                for target in record.get("path_snapshot") or []
-                if (formatted_target := format_path_target(target))
-            ],
-        })
-    return formatted_records
+        raw_records.append(root_record)
+    raw_records.extend(record for record in records if isinstance(record, dict))
+    return [format_dfs_record(record, graph) for record in raw_records]
 
 
 def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]], List[str]]:
@@ -240,6 +300,7 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
                     item["effect"] = operation["effect"]
                 operations.append(item)
             records.append({
+                "page_name": page_name,
                 "package_name": str(graph.get("package_name") or ""),
                 "main_page_name": str(graph.get("main_page_name") or ""),
                 "page_description": "_".join(label for label in labels if label) or fallback,
@@ -260,6 +321,47 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
 
     visit(root_page, [])
     return records, sorted(str(page) for page in states if page not in visited)
+
+
+def build_page_dfs_record(
+    graph: Graph,
+    page_name: str,
+    *,
+    apply_override: bool = True,
+) -> Dict[str, Any]:
+    """Build the resolved or automatic DFS record for one reachable page."""
+    traversal_config = graph.get("traversal_config")
+    root_page = str(
+        traversal_config.get("root_page")
+        if isinstance(traversal_config, dict) and traversal_config.get("root_page")
+        else "Pages_root"
+    )
+    if page_name == root_page:
+        raw = root_dfs_record(graph, [])
+        if raw is None:
+            raise ValueError(f"root page does not exist in graph: {root_page}")
+        return format_dfs_record(raw, graph, apply_override=apply_override)
+
+    records, _ = export_dfs_paths(graph, root_page)
+    raw = next((record for record in records if record.get("page_name") == page_name), None)
+    if raw is None:
+        if page_name not in graph.get("states", {}):
+            raise ValueError(f"页面不存在：{page_name}")
+        raise ValueError(f"页面从 {root_page} 不可达，无法生成 DFS 路径：{page_name}")
+    return format_dfs_record(raw, graph, apply_override=apply_override)
+
+
+def build_page_dfs_preview(graph: Graph, page_name: str) -> Dict[str, Any]:
+    """Return automatic and currently resolved records for the Web editor."""
+    state = graph.get("states", {}).get(page_name)
+    if not isinstance(state, dict):
+        raise ValueError(f"页面不存在：{page_name}")
+    return {
+        "page_name": page_name,
+        "manual_override": isinstance(state.get(DFS_OVERRIDE_FIELD), dict),
+        "automatic_record": build_page_dfs_record(graph, page_name, apply_override=False),
+        "record": build_page_dfs_record(graph, page_name, apply_override=True),
+    }
 
 
 class DfsPathExporter:
@@ -284,7 +386,7 @@ class DfsPathExporter:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export compact DFS paths from settings_navigation_graph.json.")
-    parser.add_argument("--work-dir", default="demo_settings", help="Project work dir containing outputs/navigation/settings_navigation_graph.json.")
+    parser.add_argument("--work-dir", default="settings_workspace", help="Project work dir containing outputs/navigation/settings_navigation_graph.json.")
     parser.add_argument("--graph", default="", help="Explicit graph path; overrides --work-dir.")
     parser.add_argument("--root", default="", help="DFS root; defaults to traversal_config.root_page or Pages_root.")
     parser.add_argument("--output", default="", help="Output path; defaults beside the graph.")
