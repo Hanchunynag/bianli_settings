@@ -167,6 +167,63 @@ function renderDirectory(data) {
   const roots = data.items || [];
   let shown = 0;
   const total = roots.reduce((sum, node) => sum + totalCount(node), 0);
+  const selectedPage = (
+    store.selectedPage
+    || store.data?.active_page
+    || store.data?.active_state?.page_name
+    || store.data?.state?.page_name
+    || ''
+  );
+  const findNodePath = (nodes, pageName, ancestors = []) => {
+    for (const node of nodes) {
+      if (node.page_name === pageName) return { node, ancestors };
+      const found = findNodePath(
+        node.children || [],
+        pageName,
+        [...ancestors, node],
+      );
+      if (found) return found;
+    }
+    return null;
+  };
+  const expandSubtree = (node) => {
+    if ((node.children || []).length) store.expandedPages.add(node.page_name);
+    (node.children || []).forEach(expandSubtree);
+  };
+  const focusDirectoryPage = (pageName) => {
+    requestAnimationFrame(() => {
+      const item = [...box.querySelectorAll('.dirTreeItem')]
+        .find((candidate) => candidate.dataset.pageName === pageName);
+      item?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+  };
+  const expandSelectedButton = el('expandSelectedBtn');
+  const collapseAllButton = el('collapseAllBtn');
+  const selectedLocation = findNodePath(roots, selectedPage);
+  expandSelectedButton.disabled = !selectedLocation;
+  expandSelectedButton.onclick = () => {
+    const targetPage = (
+      store.selectedPage
+      || store.data?.active_page
+      || store.data?.active_state?.page_name
+      || store.data?.state?.page_name
+      || ''
+    );
+    const location = findNodePath(roots, targetPage);
+    if (!location) return;
+    store.directoryQuery = '';
+    search.value = '';
+    location.ancestors.forEach((node) => store.expandedPages.add(node.page_name));
+    expandSubtree(location.node);
+    renderDirectory(data);
+    focusDirectoryPage(targetPage);
+  };
+  collapseAllButton.onclick = () => {
+    store.directoryQuery = '';
+    search.value = '';
+    store.expandedPages.clear();
+    renderDirectory(data);
+  };
 
   const addNode = (
     node,
@@ -183,8 +240,9 @@ function renderDirectory(data) {
     const expanded = expandable && (Boolean(query) || store.expandedPages.has(node.page_name));
     const treeItem = document.createElement('div');
     treeItem.className = `dirTreeItem${depth === 0 ? ' isRoot' : ''}`;
+    treeItem.dataset.pageName = node.page_name;
     const row = document.createElement('div');
-    row.className = 'dirNode';
+    row.className = `dirNode${node.page_name === selectedPage ? ' isSelected' : ''}`;
     const title = node.title || node.page_name;
     row.innerHTML = `
       <div class="dirMain${expandable ? ' isExpandable' : ''}" ${expandable ? `role="button" tabindex="0" aria-expanded="${expanded}"` : ''}>
@@ -271,6 +329,13 @@ function renderDirectory(data) {
 async function loadPageDetail(pageName) {
   store.selectedPage = pageName;
   store.showingOrphans = false;
+  el('expandSelectedBtn').disabled = false;
+  el('pageDirectory').querySelectorAll('.dirTreeItem').forEach((item) => {
+    item.querySelector(':scope > .dirNode')?.classList.toggle(
+      'isSelected',
+      item.dataset.pageName === pageName,
+    );
+  });
   const data = await api(`/api/page_detail?page_name=${encodeURIComponent(pageName)}`);
   if (!data?.ok) return;
   const box = el('pageDetail');
@@ -335,70 +400,112 @@ async function loadPageDetail(pageName) {
           <strong>${escapeHtml(`${transition.from_page_description || transition.from_page} → ${transition.to_page_description || transition.to_page}`)}</strong>
           <ol>${transitionSteps(transition).map((step) => `<li>${escapeHtml(stepLabel(step))}</li>`).join('')}</ol>
         </div>
-        <button class="danger" data-action="delete-transition" data-id="${escapeHtml(transition.transition_id || '')}">删除跳转</button>
+        <button class="danger compact" data-action="delete-transition" data-id="${escapeHtml(transition.transition_id || '')}">删除跳转</button>
       </div>`).join('') : '<div class="muted">无</div>'}`;
   box.innerHTML = `
-    <h3>${escapeHtml(currentDescription)}</h3>
-    ${data.page_name !== 'Pages_root' ? '<button class="secondary" data-action="rename">修改内部页面 ID</button>' : ''}
-    <button class="secondary" data-action="json">查看本页 JSON</button>
-    <section class="dfsEditor">
-      <div class="dfsEditorTitle">
-        <h4>当前页面 DFS 维护</h4>
-        <span class="statusBadge ${dfsIsManual ? 'isManual' : ''}">${dfsIsManual ? '人工配置' : '自动生成'}</span>
-      </div>
-      <p class="muted">page_description 保存完整 DFS 路径描述，前端只显示最后一个页面名称；path_snapshot 保存实际点击步骤。menu_grid 等中间操作不会作为页面名称展示。</p>
-      <form id="dfsManualForm">
-        <label>
-          <span>package_name</span>
-          <input name="package_name" value="${escapeHtml(dfsRecord.package_name || '')}" required />
-        </label>
-        <label>
-          <span>main_page_name</span>
-          <input name="main_page_name" value="${escapeHtml(dfsRecord.main_page_name || '')}" required />
-        </label>
-        <label>
-          <span>page_description（可直接修改）</span>
-          <input name="page_description" value="${escapeHtml(dfsRecord.page_description || '')}" required />
-        </label>
-        <label>
-          <span>path_snapshot（JSON 数组）</span>
-          <textarea name="path_snapshot" rows="12" spellcheck="false">${escapeHtml(JSON.stringify(dfsRecord.path_snapshot || [], null, 2))}</textarea>
-        </label>
-        <div class="dfsEditorActions">
-          <button class="primary" type="submit">保存 page_description / DFS 数据</button>
-          <button class="secondary" type="button" data-action="export-dfs">生成 DFS 精简文件</button>
-          <button class="secondary" type="button" data-action="view-dfs">查看当前页面 DFS 分支</button>
-          ${dfsIsManual ? '<button class="secondary" type="button" data-action="reset-dfs">恢复自动生成</button>' : ''}
+    <header class="pageDetailHeader">
+      <div class="pageDetailIdentity">
+        <h3>${escapeHtml(currentDescription)}</h3>
+        <div class="detailMetrics">
+          <span>进入 ${data.incoming_transitions?.length || 0}</span>
+          <span>离开 ${data.outgoing_transitions?.length || 0}</span>
+          <span>操作 ${operations.length}</span>
+          <span>变体 ${variants.length}</span>
+          <span>续录 ${captures.length}</span>
         </div>
-      </form>
-      <div id="dfsBranchDetail" class="dfsBranchDetail hidden"></div>
-    </section>
-    ${renderTransitions('从哪些页面可以进来', data.incoming_transitions || [])}
-    ${renderTransitions('从当前页面可以去哪里', data.outgoing_transitions || [])}
-    <h4>页面内操作</h4>
-    ${operations.length ? operations.map((operation) => `
-      <div class="operationRow">
-      <div class="operationMain">
-        <strong>${escapeHtml(`${operation.operate || 'tap'} ${operation.target?.step_prompt || operation.target?.key_description || operation.target?.text || operation.target?.value || operation.target?.key || '当前区域'}`)}</strong>
-        <span>${escapeHtml(operation.effect || 'same_page_state_changed')}</span>
-        <code>${escapeHtml(operation.operation_id || '')}</code>
       </div>
-      <button class="danger" data-action="delete-operation" data-id="${escapeHtml(operation.operation_id || '')}">删除操作</button>
-      </div>`).join('') : '<div class="muted">无</div>'}
-    <h4>同页状态变体</h4>
-    ${variants.length ? variants.map((variant) => `
-      <div class="operationRow"><div class="operationMain">
-        <strong>${escapeHtml(variant.trigger?.step_prompt || variant.trigger?.key_description || variant.trigger?.text || variant.trigger?.value || variant.trigger_operation_id || '同页操作')}</strong>
-        <span>${escapeHtml(variant.effect || 'same_page_state_changed')} · 新增 ${(variant.revealed_candidates || []).length} · 消失 ${(variant.hidden_candidates || []).length}${variant.is_mutually_exclusive ? ' · 互斥场景' : ''}</span>
-        <code>${escapeHtml(variant.variant_id || '')}</code>
-      </div></div>`).join('') : '<div class="muted">无</div>'}
-    <h4>继续录制</h4>
-    ${captures.length ? captures.map((capture) => `
-      <div class="detailRow">
-        <span>${escapeHtml(`${capture.capture_id} candidates=${capture.candidate_count || 0}`)}</span>
-        <button class="secondary" data-action="delete-capture" data-id="${escapeHtml(capture.capture_id || '')}">删除该次续录</button>
-        <button class="danger" data-action="delete-capture-candidates" data-id="${escapeHtml(capture.capture_id || '')}">删除该次续录及其候选控件</button>
-      </div>`).join('') : '<div class="muted">无</div>'}`;
+      <div class="pageDetailActions">
+        ${data.page_name !== 'Pages_root' ? '<button class="secondary compact" data-action="rename">修改内部页面 ID</button>' : ''}
+        <button class="secondary compact" data-action="json">查看原始 JSON</button>
+      </div>
+    </header>
+    <details class="detailSection" open>
+      <summary>
+        <span>DFS 维护</span>
+        <span class="statusBadge ${dfsIsManual ? 'isManual' : ''}">${dfsIsManual ? '人工配置' : '自动生成'}</span>
+      </summary>
+      <div class="detailSectionBody">
+        <section class="dfsEditor">
+          <p class="muted">page_description 保存完整 DFS 路径描述，前端只显示最后一个页面名称；path_snapshot 保存实际点击步骤。menu_grid 等中间操作不会作为页面名称展示。</p>
+          <form id="dfsManualForm">
+            <details class="dfsAdvanced">
+              <summary>运行标识（通常无需修改）</summary>
+              <div class="dfsAdvancedBody">
+                <label>
+                  <span>package_name</span>
+                  <input name="package_name" value="${escapeHtml(dfsRecord.package_name || '')}" required />
+                </label>
+                <label>
+                  <span>main_page_name</span>
+                  <input name="main_page_name" value="${escapeHtml(dfsRecord.main_page_name || '')}" required />
+                </label>
+              </div>
+            </details>
+            <label>
+              <span>page_description（可直接修改）</span>
+              <input name="page_description" value="${escapeHtml(dfsRecord.page_description || '')}" required />
+            </label>
+            <label>
+              <span>path_snapshot（JSON 数组）</span>
+              <textarea name="path_snapshot" rows="10" spellcheck="false">${escapeHtml(JSON.stringify(dfsRecord.path_snapshot || [], null, 2))}</textarea>
+            </label>
+            <div class="dfsEditorActions">
+              <button class="primary" type="submit">保存 DFS 数据</button>
+              <button class="secondary" type="button" data-action="view-dfs">查看 DFS 分支</button>
+              <button class="secondary" type="button" data-action="export-dfs">生成精简文件</button>
+              ${dfsIsManual ? '<button class="secondary" type="button" data-action="reset-dfs">恢复自动生成</button>' : ''}
+            </div>
+          </form>
+          <div id="dfsBranchDetail" class="dfsBranchDetail hidden"></div>
+        </section>
+      </div>
+    </details>
+    <details class="detailSection" open>
+      <summary>
+        <span>页面跳转</span>
+        <small>进入 ${data.incoming_transitions?.length || 0} · 离开 ${data.outgoing_transitions?.length || 0}</small>
+      </summary>
+      <div class="detailSectionBody">
+        ${renderTransitions('从哪些页面可以进来', data.incoming_transitions || [])}
+        ${renderTransitions('从当前页面可以去哪里', data.outgoing_transitions || [])}
+      </div>
+    </details>
+    <details class="detailSection">
+      <summary><span>页面内操作</span><small>${operations.length}</small></summary>
+      <div class="detailSectionBody">
+        ${operations.length ? operations.map((operation) => `
+          <div class="operationRow">
+            <div class="operationMain">
+              <strong>${escapeHtml(`${operation.operate || 'tap'} ${operation.target?.step_prompt || operation.target?.key_description || operation.target?.text || operation.target?.value || operation.target?.key || '当前区域'}`)}</strong>
+              <span>${escapeHtml(operation.effect || 'same_page_state_changed')}</span>
+              <code>${escapeHtml(operation.operation_id || '')}</code>
+            </div>
+            <button class="danger compact" data-action="delete-operation" data-id="${escapeHtml(operation.operation_id || '')}">删除操作</button>
+          </div>`).join('') : '<div class="muted">无</div>'}
+      </div>
+    </details>
+    <details class="detailSection">
+      <summary><span>同页状态变体</span><small>${variants.length}</small></summary>
+      <div class="detailSectionBody">
+        ${variants.length ? variants.map((variant) => `
+          <div class="operationRow"><div class="operationMain">
+            <strong>${escapeHtml(variant.trigger?.step_prompt || variant.trigger?.key_description || variant.trigger?.text || variant.trigger?.value || variant.trigger_operation_id || '同页操作')}</strong>
+            <span>${escapeHtml(variant.effect || 'same_page_state_changed')} · 新增 ${(variant.revealed_candidates || []).length} · 消失 ${(variant.hidden_candidates || []).length}${variant.is_mutually_exclusive ? ' · 互斥场景' : ''}</span>
+            <code>${escapeHtml(variant.variant_id || '')}</code>
+          </div></div>`).join('') : '<div class="muted">无</div>'}
+      </div>
+    </details>
+    <details class="detailSection">
+      <summary><span>继续录制</span><small>${captures.length}</small></summary>
+      <div class="detailSectionBody">
+        ${captures.length ? captures.map((capture) => `
+          <div class="detailRow">
+            <span>${escapeHtml(`${capture.capture_id} candidates=${capture.candidate_count || 0}`)}</span>
+            <button class="secondary compact" data-action="delete-capture" data-id="${escapeHtml(capture.capture_id || '')}">删除本次续录</button>
+            <button class="danger compact" data-action="delete-capture-candidates" data-id="${escapeHtml(capture.capture_id || '')}">连同候选控件删除</button>
+          </div>`).join('') : '<div class="muted">无</div>'}
+      </div>
+    </details>`;
   const dfsForm = box.querySelector('#dfsManualForm');
   dfsForm.onsubmit = async (event) => {
     event.preventDefault();
@@ -435,8 +542,10 @@ async function loadPageDetail(pageName) {
       renamePage(data);
     } else if (action === 'json') {
       const graphBox = el('graphBox');
-      graphBox.textContent = JSON.stringify(detailJson, null, 2);
-      graphBox.classList.remove('hidden');
+      const willShow = graphBox.classList.contains('hidden');
+      if (willShow) graphBox.textContent = JSON.stringify(detailJson, null, 2);
+      graphBox.classList.toggle('hidden', !willShow);
+      button.textContent = willShow ? '隐藏原始 JSON' : '查看原始 JSON';
     } else if (action === 'delete-transition') {
       dryRunDelete('transition', { transition_id: button.dataset.id });
     } else if (action === 'delete-operation') {

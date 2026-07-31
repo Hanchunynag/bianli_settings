@@ -1,7 +1,7 @@
 import { api, postJson } from './nav/api.js';
 import { el } from './nav/dom.js';
 import { store } from './nav/state.js';
-import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=directory-menu-10';
+import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=follow-active-page-12';
 
 const popupTypeButtons = [...document.querySelectorAll('[data-popup-type]')];
 const popupTypes = new Set(popupTypeButtons.map((button) => button.dataset.popupType));
@@ -16,8 +16,19 @@ function selectPopupType(popupType = null, rerender = true) {
   if (rerender) render(store.data);
 }
 
-el('captureBtn').onclick = async () => render(await postJson('/api/console_action', { action: 'capture_current', payload: {} }));
-el('backBtn').onclick = async () => render(await postJson('/api/console_action', { action: 'system_back', payload: {} }));
+function renderFollowingActivePage(data) {
+  if (!data) return;
+  store.selectedPage = null;
+  store.showingOrphans = false;
+  render(data);
+}
+
+el('captureBtn').onclick = async () => renderFollowingActivePage(
+  await postJson('/api/console_action', { action: 'capture_current', payload: {} }),
+);
+el('backBtn').onclick = async () => renderFollowingActivePage(
+  await postJson('/api/console_action', { action: 'system_back', payload: {} }),
+);
 el('clearPendingBtn').onclick = async () => render(await postJson('/api/console_action', { action: 'clear_pending', payload: {} }));
 el('orphanBtn').onclick = refreshOrphans;
 popupTypeButtons.forEach((button) => {
@@ -55,7 +66,7 @@ el('screen').addEventListener('click', async (event) => {
   } finally {
     if (popupType) selectPopupType(null, false);
   }
-  render(data);
+  renderFollowingActivePage(data);
 });
 
 window.addEventListener('resize', renderOverlay);

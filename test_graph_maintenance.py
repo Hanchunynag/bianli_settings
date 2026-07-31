@@ -101,6 +101,9 @@ class GraphMaintenanceTest(unittest.TestCase):
         render_js = (
             project_dir / "static" / "nav" / "render.js"
         ).read_text(encoding="utf-8")
+        template = (
+            project_dir / "templates" / "nav.html"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("height: 46px;", css)
         self.assertIn(".dirActionMenu {", css)
@@ -112,6 +115,46 @@ class GraphMaintenanceTest(unittest.TestCase):
             render_js.index('<details class="dirMore">'),
             render_js.index('data-action="detail">详情</button>'),
         )
+        self.assertIn('id="expandSelectedBtn"', template)
+        self.assertIn('id="collapseAllBtn"', template)
+        self.assertIn("expandSubtree(location.node)", render_js)
+        self.assertIn("store.expandedPages.clear()", render_js)
+
+    def test_page_detail_uses_summary_and_collapsible_sections(self):
+        project_dir = Path(__file__).resolve().parent
+        css = (project_dir / "static" / "nav.css").read_text(encoding="utf-8")
+        render_js = (
+            project_dir / "static" / "nav" / "render.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('class="pageDetailHeader"', render_js)
+        self.assertIn('class="detailMetrics"', render_js)
+        self.assertGreaterEqual(
+            render_js.count('class="detailSection"'),
+            3,
+        )
+        self.assertIn('class="dfsAdvanced"', render_js)
+        self.assertIn(".detailSection > summary", css)
+        self.assertIn(".detailSectionBody", css)
+
+    def test_capture_recording_and_back_follow_the_active_page_detail(self):
+        project_dir = Path(__file__).resolve().parent
+        nav_js = (project_dir / "static" / "nav.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function renderFollowingActivePage(data)", nav_js)
+        self.assertIn("store.selectedPage = null;", nav_js)
+        self.assertIn("store.showingOrphans = false;", nav_js)
+        self.assertIn(
+            "el('captureBtn').onclick = async () => renderFollowingActivePage(",
+            nav_js,
+        )
+        self.assertIn(
+            "el('backBtn').onclick = async () => renderFollowingActivePage(",
+            nav_js,
+        )
+        self.assertIn("renderFollowingActivePage(data);", nav_js)
 
     def test_key_locator_is_replaced_by_text_without_stale_key(self):
         target = {

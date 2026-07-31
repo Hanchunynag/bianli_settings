@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>设置导航录制 Web 控制台</title>
-  <link rel="stylesheet" href="../static/nav.css?v=directory-menu-10" />
+  <link rel="stylesheet" href="../static/nav.css?v=follow-active-page-12" />
 </head>
 <body>
   <header class="topbar">
@@ -58,7 +58,11 @@
     <section class="panel directoryPanel">
       <div class="panelHeader directoryHeader">
         <h2>页面目录 <span id="directoryCount" class="countBadge">0</span></h2>
-        <input id="pageSearch" class="searchInput" placeholder="搜索页面或 page_name" />
+        <div class="directoryTools">
+          <input id="pageSearch" class="searchInput" placeholder="搜索页面或 page_name" />
+          <button id="expandSelectedBtn" class="secondary compact" type="button">展开所选页面</button>
+          <button id="collapseAllBtn" class="secondary compact" type="button">全部收起</button>
+        </div>
       </div>
       <div id="pageDirectory" class="directory"></div>
     </section>
@@ -71,6 +75,6 @@
       <pre id="graphBox" class="graphBox hidden"></pre>
     </section>
   </main>
-  <script type="module" src="../static/nav.js?v=directory-menu-10"></script>
+  <script type="module" src="../static/nav.js?v=follow-active-page-12"></script>
 </body>
 </html>
