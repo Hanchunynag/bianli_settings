@@ -359,6 +359,8 @@ async function loadPageDetail(pageName) {
     path_snapshot: [],
   };
   const dfsIsManual = Boolean(data.dfs_manual);
+  const dfsIssue = String(data.dfs_issue || '').trim();
+  const dfsStatusLabel = dfsIsManual ? '人工配置' : (dfsIssue ? '待维护' : '自动生成');
   const recordDisplayName = (record) => {
     const description = localDescription(record?.page_description);
     if (description) return description;
@@ -432,9 +434,10 @@ async function loadPageDetail(pageName) {
     <details class="detailSection" open>
       <summary>
         <span>DFS 维护（页面 / 特殊操作）</span>
-        <span class="statusBadge ${dfsIsManual ? 'isManual' : ''}">${dfsIsManual ? '人工配置' : '自动生成'}</span>
+        <span class="statusBadge ${dfsIsManual ? 'isManual' : ''}">${dfsStatusLabel}</span>
       </summary>
       <div class="detailSectionBody">
+        ${dfsIssue ? `<p class="muted"><strong>自动 DFS 未完成：</strong>${escapeHtml(dfsIssue)}</p>` : ''}
         <section class="dfsEditor">
           <p class="muted">page_description 保存完整 DFS 路径描述，前端只显示最后一个页面名称；path_snapshot 保存实际点击步骤。menu_grid 等中间操作不会作为页面名称展示。</p>
           <form id="dfsManualForm">

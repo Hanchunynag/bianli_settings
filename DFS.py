@@ -637,6 +637,30 @@ def format_dfs_records(records: List[Dict[str, Any]], graph: Graph) -> List[Dict
     return formatted_records
 
 
+def transition_dfs_targets(transition: Any) -> Optional[List[Target]]:
+    """Return executable DFS locators for one transition, or None when incomplete."""
+    if not isinstance(transition, dict):
+        return None
+    steps = transition.get("steps")
+    if not isinstance(steps, list) or not steps:
+        target = transition.get("target")
+        steps = [
+            {"operate": transition.get("operate") or "tap", "target": target}
+        ] if isinstance(target, dict) and target else []
+    if not steps:
+        return None
+
+    targets: List[Target] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            return None
+        formatted = format_path_target(step.get("target"))
+        if not formatted:
+            return None
+        targets.append(formatted)
+    return targets
+
+
 def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]], List[str]]:
     states = graph.get("states")
     if not isinstance(states, dict):
@@ -691,11 +715,9 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
             to_page = str(transition.get("to_page") or "")
             if not to_page or to_page in visited:
                 continue
-            steps = transition.get("steps")
-            if not isinstance(steps, list) or not steps:
-                target = transition.get("target")
-                steps = [{"operate": transition.get("operate") or "tap", "target": target}] if isinstance(target, dict) and target else []
-            targets = [compact_target(step.get("target")) for step in steps if isinstance(step, dict)]
+            targets = transition_dfs_targets(transition)
+            if targets is None:
+                continue
             child_state = states.get(to_page, {})
             segment = page_description_segment(
                 to_page,
@@ -705,7 +727,7 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
             )
             visit(
                 to_page,
-                [*path_snapshot, *(target for target in targets if target)],
+                [*path_snapshot, *targets],
                 [*description_segments, *([segment] if segment else [])],
             )
 

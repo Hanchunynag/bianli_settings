@@ -77,6 +77,7 @@ from DFS import (
     format_dfs_records,
     format_path_target,
     format_special_step,
+    transition_dfs_targets,
     replace_navigation_target_locator,
     sync_descendant_manual_dfs_prefixes,
 )
@@ -1391,7 +1392,31 @@ def api_page_detail(page_name: str) -> JSONResponse:
     if migrate_legacy_special_manual_history(state):
         config.graphs.save(graph)
     transitions = graph.get("transitions", [])
-    dfs_record = dfs_record_for_page(graph, page_name) or {
+    generated_dfs_record = dfs_record_for_page(graph, page_name)
+    root_page = str(graph.get("traversal_config", {}).get("root_page") or "Pages_root")
+    dfs_issue = ""
+    if generated_dfs_record is None and page_name != root_page:
+        incoming = [
+            item for item in transitions
+            if isinstance(item, dict) and item.get("to_page") == page_name
+        ]
+        direct_invalid = [
+            item for item in incoming
+            if transition_dfs_targets(item) is None
+        ]
+        if direct_invalid:
+            dfs_issue = (
+                "当前页面已绑定父级，但进入该页面的跳转缺少可执行 key/text locator；"
+                "自动 DFS 不会继承父页面路径，请人工维护缺失的最后一步。"
+            )
+        elif incoming:
+            dfs_issue = (
+                "当前页面存在进入跳转，但上游路径中有缺失的 key/text locator；"
+                "自动 DFS 暂不可达。"
+            )
+        else:
+            dfs_issue = "当前页面没有从根页面可达的完整跳转路径，自动 DFS 暂不可用。"
+    dfs_record = generated_dfs_record or {
         "package_name": str(graph.get("package_name") or ""),
         "main_page_name": str(graph.get("main_page_name") or ""),
         "page_description": str(
@@ -1422,6 +1447,7 @@ def api_page_detail(page_name: str) -> JSONResponse:
         continued_captures=state.get("continued_captures", []) or [],
         dfs_record=dfs_record,
         dfs_manual=state.get(DFS_MANUAL_FIELD),
+        dfs_issue=dfs_issue,
     )
 
 
