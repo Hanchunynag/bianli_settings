@@ -34,7 +34,7 @@ DFS_RECORD_FIELDS = (
     "main_page_name",
     "page_description",
     "path_snapshot",
-    "special",
+    "special_opearte",
 )
 
 DFS_TARGET_FIELDS = (
@@ -106,6 +106,7 @@ def format_path_target(target: Any) -> Target:
 
 
 def format_special_step(operation: Any) -> Dict[str, Any]:
+    """Format one page-local special step into the compact special contract."""
     if not isinstance(operation, dict):
         return {}
     target = compact_target(operation.get("target"))
@@ -131,7 +132,6 @@ def format_special_step(operation: Any) -> Dict[str, Any]:
         target.get("step_prompt") or target.get("key_description") or text or locator_value or ""
     ).strip()
     step: Dict[str, Any] = {
-        "operate": str(operation.get("operate") or "tap"),
         "type": locator_type,
         "value": locator_value,
     }
@@ -156,50 +156,54 @@ def _special_session_metadata(effect: Any) -> Optional[tuple[str, int]]:
 
 
 def build_special_operations(state: Any) -> Dict[str, Any]:
+    """Return ``operationN -> [step, ...]`` in persisted recording order.
+
+    A special capture session becomes one operation array. A popup becomes one
+    operation array containing its opening step. Ordinary page operations are
+    intentionally excluded from this structure.
+    """
     if not isinstance(state, dict):
         return {}
     operations = state.get("page_operations")
     if not isinstance(operations, list):
         return {}
+
     groups: List[Dict[str, Any]] = []
     session_groups: Dict[str, Dict[str, Any]] = {}
     for index, operation in enumerate(operations):
         if not isinstance(operation, dict):
             continue
+        session = _special_session_metadata(operation.get("effect"))
+        popup_type = str(operation.get("popup_type") or "").strip()
+        is_popup = bool(popup_type or str(operation.get("effect") or "").strip() == "open_popup")
+        is_explicit_special = str(operation.get("operation_kind") or "").strip() == "special_operate"
+        if not session and not is_popup and not is_explicit_special:
+            continue
+
         step = format_special_step(operation)
         if not step:
             continue
-        session = _special_session_metadata(operation.get("effect"))
+
         if session:
             session_id, step_index = session
             group = session_groups.get(session_id)
             if group is None:
-                group = {
-                    "kind": "special_operate",
-                    "first_index": index,
-                    "steps": [],
-                }
+                group = {"first_index": index, "steps": []}
                 session_groups[session_id] = group
                 groups.append(group)
             group["steps"].append((step_index, step))
             continue
-        popup_type = str(operation.get("popup_type") or "").strip()
-        effect = str(operation.get("effect") or "").strip()
-        kind = "popup" if popup_type or effect == "open_popup" else "special_operate"
-        group = {"kind": kind, "first_index": index, "steps": [(1, step)]}
-        if popup_type:
-            group["popup_type"] = popup_type
-        groups.append(group)
+
+        groups.append({"first_index": index, "steps": [(1, step)]})
+
     groups.sort(key=lambda item: int(item.get("first_index", 0)))
     output: Dict[str, Any] = {}
-    for operate_index, group in enumerate(groups, start=1):
-        item: Dict[str, Any] = {"kind": group.get("kind") or "special_operate"}
-        if group.get("popup_type"):
-            item["popup_type"] = group["popup_type"]
-        sorted_steps = sorted(group.get("steps") or [], key=lambda pair: int(pair[0]))
-        for step_number, (_, step) in enumerate(sorted_steps, start=1):
-            item[f"step{step_number}"] = step
-        output[f"operate{operate_index}"] = item
+    for operation_index, group in enumerate(groups, start=1):
+        ordered_steps = [
+            step
+            for _, step in sorted(group.get("steps") or [], key=lambda pair: int(pair[0]))
+        ]
+        output[f"operation{operation_index}"] = ordered_steps
     return output
 
 
@@ -440,13 +444,13 @@ def root_dfs_record(graph: Graph, records: List[Dict[str, Any]]) -> Optional[Dic
         "main_page_name": str(graph.get("main_page_name") or first_record.get("main_page_name") or ""),
         "page_description": description,
         "path_snapshot": [],
-        "special": build_special_operations(root_state),
+        "special_opearte": build_special_operations(root_state),
     }
     return apply_manual_dfs(record, root_state)
 
 
 def format_dfs_record(record: Dict[str, Any]) -> Dict[str, Any]:
-    special = record.get("special")
+    special_opearte = record.get("special_opearte")
     return {
         "package_name": str(record.get("package_name") or ""),
         "main_page_name": str(record.get("main_page_name") or ""),
@@ -456,7 +460,7 @@ def format_dfs_record(record: Dict[str, Any]) -> Dict[str, Any]:
             for target in record.get("path_snapshot") or []
             if (formatted_target := format_path_target(target))
         ],
-        "special": special if isinstance(special, dict) else {},
+        "special_opearte": special_opearte if isinstance(special_opearte, dict) else {},
     }
 
 
@@ -511,7 +515,7 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
                 "main_page_name": str(graph.get("main_page_name") or ""),
                 "page_description": "_".join(description_segments) or fallback,
                 "path_snapshot": path_snapshot,
-                "special": build_special_operations(state),
+                "special_opearte": build_special_operations(state),
             }
             records.append(apply_manual_dfs(record, state))
         for transition in outgoing.get(page_name, []):
@@ -550,7 +554,7 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
         records.append({
             "page_name": str(page_name),
             **manual,
-            "special": build_special_operations(state),
+            "special_opearte": build_special_operations(state),
             "is_manual": True,
         })
         visited.add(str(page_name))
