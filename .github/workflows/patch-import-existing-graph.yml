@@ -1,0 +1,74 @@
+name: Patch import existing graph
+on:
+  push:
+    branches:
+      - feature/import-existing-graph
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/import-existing-graph
+      - name: Patch existing production files
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path_name, old, new):
+              path = Path(path_name)
+              text = path.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'anchor not found: {path_name}')
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # 1) Profile manager: import a complete existing graph as an independent profile.
+          old = '''        profiles.append(profile)\n        self._save_profiles(profiles)\n        return profile\n\n\ndef add_transition(graph: Dict[str, Any], transition: Dict[str, Any]) -> None:\n'''
+          new = '''        profiles.append(profile)\n        self._save_profiles(profiles)\n        return profile\n\n    def import_graph(\n        self,\n        *,\n        name: str,\n        settings_version: str,\n        device_model: str,\n        graph: Dict[str, Any],\n        source_filename: str = "",\n    ) -> Dict[str, Any]:\n        """Register an already-recorded navigation graph as an independent profile."""\n        name = str(name or "").strip()\n        settings_version = str(settings_version or "").strip()\n        device_model = str(device_model or "").strip()\n        source_filename = Path(str(source_filename or "")).name\n        if not settings_version:\n            raise ValueError("设置版本不能为空")\n        if not device_model:\n            raise ValueError("机型不能为空")\n        if not isinstance(graph, dict):\n            raise ValueError("导入 Graph 必须是 JSON 对象")\n\n        imported_graph = json.loads(json.dumps(graph, ensure_ascii=False))\n        states = imported_graph.get("states")\n        transitions = imported_graph.get("transitions")\n        if not isinstance(states, dict) or not states:\n            raise ValueError("导入 Graph 缺少有效 states，至少需要一个页面")\n        if not isinstance(transitions, list):\n            raise ValueError("导入 Graph 的 transitions 必须是数组")\n        traversal = imported_graph.get("traversal_config")\n        if not isinstance(traversal, dict):\n            traversal = {\n                "strategy": "dfs",\n                "root_page": "Pages_root",\n                "default_return_policy": {"type": "system_back"},\n            }\n            imported_graph["traversal_config"] = traversal\n        root_page = str(traversal.get("root_page") or "Pages_root").strip()\n        traversal["root_page"] = root_page\n        if root_page not in states:\n            raise ValueError(f"导入 Graph 的根页面不存在于 states：{root_page}")\n\n        invalid_transitions = []\n        for index, transition in enumerate(transitions, start=1):\n            if not isinstance(transition, dict):\n                invalid_transitions.append(f"#{index}: 不是对象")\n                continue\n            from_page = str(transition.get("from_page") or "").strip()\n            to_page = str(transition.get("to_page") or "").strip()\n            if not from_page or not to_page:\n                invalid_transitions.append(f"#{index}: 缺少 from_page/to_page")\n            elif from_page not in states or to_page not in states:\n                invalid_transitions.append(f"#{index}: {from_page} -> {to_page} 引用了不存在页面")\n        if invalid_transitions:\n            preview = "；".join(invalid_transitions[:5])\n            suffix = "；..." if len(invalid_transitions) > 5 else ""\n            raise ValueError(f"导入 Graph 含无效 transition：{preview}{suffix}")\n\n        profiles = self._load_profiles()\n        duplicate = next((\n            item for item in profiles\n            if str(item.get("settings_version") or "").casefold()\n            == settings_version.casefold()\n            and str(item.get("device_model") or "").casefold()\n            == device_model.casefold()\n        ), None)\n        if duplicate:\n            raise ValueError(\n                f"该设置版本和机型已经存在：{duplicate.get('name') or duplicate['profile_id']}"\n            )\n\n        profile_id = f"profile_{uuid.uuid4().hex[:12]}"\n        created_at = now_iso()\n        profile = {\n            "profile_id": profile_id,\n            "name": name or f"{settings_version} · {device_model}",\n            "settings_version": settings_version,\n            "device_model": device_model,\n            "parent_profile_id": "",\n            "source": "imported_graph",\n            "source_filename": source_filename,\n            "created_at": created_at,\n            "updated_at": created_at,\n            "is_default": False,\n        }\n        imported_graph["settings_profile"] = {\n            key: profile[key]\n            for key in (\n                "profile_id",\n                "name",\n                "settings_version",\n                "device_model",\n                "parent_profile_id",\n                "source",\n                "source_filename",\n            )\n        }\n        target_work_dir = self.profile_work_dir(profile_id)\n        save_navigation_graph(imported_graph, target_work_dir)\n        save_current_path_session(target_work_dir, root_page)\n        profiles.append(profile)\n        self._save_profiles(profiles)\n        return profile\n\n\ndef add_transition(graph: Dict[str, Any], transition: Dict[str, Any]) -> None:\n'''
+          replace_once('settings_ui_manual_recorder.py', old, new)
+
+          old = '''class CreateSettingsProfileRequest(BaseModel):\n    name: str = ""\n    settings_version: str\n    device_model: str\n    parent_profile_id: str = DEFAULT_SETTINGS_PROFILE_ID\n\n\n# Web session and graph maintenance\n'''
+          new = '''class CreateSettingsProfileRequest(BaseModel):\n    name: str = ""\n    settings_version: str\n    device_model: str\n    parent_profile_id: str = DEFAULT_SETTINGS_PROFILE_ID\n\n\nclass ImportSettingsProfileRequest(BaseModel):\n    name: str = ""\n    settings_version: str\n    device_model: str\n    source_filename: str = ""\n    graph: Dict[str, Any]\n\n\n# Web session and graph maintenance\n'''
+          replace_once('settings_ui_manual_recorder.py', old, new)
+
+          # 2) Server endpoint for JSON graph import.
+          old = '''from settings_profiles import (\n    DEFAULT_SETTINGS_PROFILE_ID,\n    CreateSettingsProfileRequest,\n    SettingsProfileManager,\n)\n'''
+          new = '''from settings_profiles import (\n    DEFAULT_SETTINGS_PROFILE_ID,\n    CreateSettingsProfileRequest,\n    ImportSettingsProfileRequest,\n    SettingsProfileManager,\n)\n'''
+          replace_once('web_nav_server.py', old, new)
+
+          old = '''\n\n@app.post("/api/record_action")\ndef api_record_action(req: ActionRequest) -> JSONResponse:\n'''
+          new = '''\n\n@app.post("/api/settings_profiles/import")\ndef api_import_settings_profile(\n    req: ImportSettingsProfileRequest,\n) -> JSONResponse:\n    profile = config.settings_profiles.import_graph(\n        name=req.name,\n        settings_version=req.settings_version,\n        device_model=req.device_model,\n        source_filename=req.source_filename,\n        graph=req.graph,\n    )\n    profile_work_dir = config.settings_profiles.profile_work_dir(\n        profile["profile_id"]\n    )\n    compact = export_compact_dfs({}, work_dir=profile_work_dir)\n    imported_graph = NavigationGraphRepository(profile_work_dir).load()\n    return ok_response(\n        profile=profile,\n        page_count=len(imported_graph.get("states", {}) or {}),\n        transition_count=len(imported_graph.get("transitions", []) or []),\n        output_path=compact.get("output_path", ""),\n        message=(\n            f"已导入 Graph 并创建配置“{profile.get('name')}”："\n            f"{len(imported_graph.get('states', {}) or {})} 页面，"\n            f"{len(imported_graph.get('transitions', []) or [])} 跳转。"\n        ),\n    )\n\n\n@app.post("/api/record_action")\ndef api_record_action(req: ActionRequest) -> JSONResponse:\n'''
+          replace_once('web_nav_server.py', old, new)
+
+          # 3) Profile dialog: add local JSON import form.
+          old = '''      <div class="profileFormActions">\n        <button class="primary" type="submit">创建并切换</button>\n      </div>\n    </form>\n  </dialog>\n  <script type="module" src="../static/nav.js?v=manual-dfs-seed-22"></script>\n'''
+          new = '''      <div class="profileFormActions">\n        <button class="primary" type="submit">创建并切换</button>\n      </div>\n    </form>\n    <form id="settingsProfileImportForm" class="settingsProfileForm">\n      <h3>导入已有 Graph</h3>\n      <p class="muted">选择之前采集保存的 settings_navigation_graph.json。导入后会成为独立 profile，不覆盖现有 Graph。</p>\n      <label>\n        <span>Graph JSON</span>\n        <input name="graph_file" type="file" accept=".json,application/json" required />\n      </label>\n      <label>\n        <span>配置名称（可选）</span>\n        <input name="name" placeholder="例如：历史 Mate X5 Graph" />\n      </label>\n      <div class="profileFormGrid">\n        <label>\n          <span>设置版本</span>\n          <input name="settings_version" placeholder="例如：HarmonyOS 5.0" required />\n        </label>\n        <label>\n          <span>机型</span>\n          <input name="device_model" placeholder="例如：Mate X5" required />\n        </label>\n      </div>\n      <div class="profileFormActions">\n        <button class="primary" type="submit">导入并切换</button>\n      </div>\n    </form>\n  </dialog>\n  <script type="module" src="../static/nav.js?v=graph-import-24"></script>\n'''
+          replace_once('templates/nav.html', old, new)
+
+          # 4) Frontend profile labels and import action.
+          old = '''  if (active?.is_default) {\n    el('profileInheritance').textContent = '默认配置 · 继续读取原始 work_dir 配置文件';\n  } else if (active) {\n    const parent = profileById.get(active.parent_profile_id);\n    el('profileInheritance').textContent = [\n      active.settings_version,\n      active.device_model,\n      `继承自 ${parent?.name || active.parent_profile_id || '默认配置'}`,\n    ].filter(Boolean).join(' · ');\n  }\n'''
+          new = '''  if (active?.is_default) {\n    el('profileInheritance').textContent = '默认配置 · 继续读取原始 work_dir 配置文件';\n  } else if (active?.source === 'imported_graph') {\n    el('profileInheritance').textContent = [\n      active.settings_version,\n      active.device_model,\n      `导入 Graph：${active.source_filename || '本地 JSON'}`,\n    ].filter(Boolean).join(' · ');\n  } else if (active) {\n    const parent = profileById.get(active.parent_profile_id);\n    el('profileInheritance').textContent = [\n      active.settings_version,\n      active.device_model,\n      `继承自 ${parent?.name || active.parent_profile_id || '默认配置'}`,\n    ].filter(Boolean).join(' · ');\n  }\n'''
+          replace_once('static/nav.js', old, new)
+
+          old = '''          <div class="profileCardSource">\n            ${profile.is_default\n              ? '直接使用启动参数指定的原始 work_dir'\n              : `创建时继承：${escapeHtml(parent?.name || profile.parent_profile_id || '默认配置')}`}\n          </div>\n'''
+          new = '''          <div class="profileCardSource">\n            ${profile.is_default\n              ? '直接使用启动参数指定的原始 work_dir'\n              : profile.source === 'imported_graph'\n                ? `导入已有 Graph${profile.source_filename ? `：${escapeHtml(profile.source_filename)}` : ''}`\n                : `创建时继承：${escapeHtml(parent?.name || profile.parent_profile_id || '默认配置')}`}\n          </div>\n'''
+          replace_once('static/nav.js', old, new)
+
+          old = '''\n\nel('screen').addEventListener('click', async (event) => {\n'''
+          new = '''\n\nel('settingsProfileImportForm').onsubmit = async (event) => {\n  event.preventDefault();\n  const form = event.currentTarget;\n  const file = form.elements.graph_file.files?.[0];\n  if (!file) {\n    window.alert('请选择 settings_navigation_graph.json。');\n    return;\n  }\n  let graph;\n  try {\n    graph = JSON.parse(await file.text());\n  } catch (error) {\n    window.alert(`Graph JSON 解析失败：${error.message}`);\n    return;\n  }\n  if (!graph || Array.isArray(graph) || typeof graph !== 'object') {\n    window.alert('Graph JSON 顶层必须是对象。');\n    return;\n  }\n  const result = await postJson('/api/settings_profiles/import', {\n    name: form.elements.name.value,\n    settings_version: form.elements.settings_version.value,\n    device_model: form.elements.device_model.value,\n    source_filename: file.name,\n    graph,\n  });\n  if (!result) return;\n  store.activeSettingsProfileId = result.profile.profile_id;\n  try {\n    window.sessionStorage.setItem(\n      'settingsProfileId',\n      result.profile.profile_id,\n    );\n  } catch (_error) {\n    // 浏览器禁用 sessionStorage 时仍使用当前标签页内存状态。\n  }\n  resetDirectoryForProfileSwitch();\n  form.reset();\n  await refreshSettingsProfiles();\n  el('settingsProfileDialog').close();\n  renderFollowingActivePage(await api('/api/state'));\n  el('overlayStatus').textContent = result.message;\n  el('overlayStatus').classList.remove('hidden');\n};\n\nel('screen').addEventListener('click', async (event) => {\n'''
+          replace_once('static/nav.js', old, new)
+      - name: Syntax check
+        run: |
+          python -m py_compile settings_ui_manual_recorder.py web_nav_server.py
+          node --check static/nav.js
+      - name: Commit patch and remove temporary files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add settings_ui_manual_recorder.py web_nav_server.py static/nav.js templates/nav.html
+          git commit -m "Support importing existing navigation graphs" || true
+          git rm .github/workflows/patch-import-existing-graph.yml .github/trigger-import-existing-graph
+          git commit -m "Remove temporary graph import patch files"
+          git push origin HEAD:feature/import-existing-graph
