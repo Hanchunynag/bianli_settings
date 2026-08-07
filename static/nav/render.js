@@ -350,7 +350,6 @@ async function loadPageDetail(pageName) {
   const operations = data.page_operations || [];
   const specialOperations = data.special_operations || [];
   const specialRecord = data.special_manual || data.special_record || {};
-  const specialIsManual = Boolean(data.special_manual);
   const variants = data.page_variants || [];
   const captures = data.continued_captures || [];
   const dfsRecord = data.dfs_manual || data.dfs_record || {
@@ -467,25 +466,6 @@ async function loadPageDetail(pageName) {
               ${dfsIsManual ? '<button class="secondary" type="button" data-action="reset-dfs">恢复自动生成</button>' : ''}
             </div>
           </form>
-          <div class="dfsEditorDivider"></div>
-          <form id="specialManualForm">
-            <div class="dfsEditorHeading">
-              <div>
-                <strong>特殊操作 DFS</strong>
-                <p class="muted">与页面 DFS 使用同一套维护方式。special 不包含 page_description 或页面到达路径；operate1/operate2 表示页面内特殊操作顺序，多步操作在同一个 operateN 下按 step1、step2 保存。</p>
-              </div>
-              <span class="statusBadge ${specialIsManual ? 'isManual' : ''}">${specialIsManual ? '人工配置' : '自动生成'}</span>
-            </div>
-            <label>
-              <span>special（JSON 对象）</span>
-              <textarea name="special" rows="14" spellcheck="false">${escapeHtml(JSON.stringify(specialRecord || {}, null, 2))}</textarea>
-            </label>
-            <div class="dfsEditorActions">
-              <button class="primary" type="submit">保存特殊操作 DFS</button>
-              <button class="secondary" type="button" data-action="export-dfs">生成精简文件</button>
-              ${specialIsManual ? '<button class="secondary" type="button" data-action="reset-special-dfs">恢复自动生成</button>' : ''}
-            </div>
-          </form>
           <div id="dfsBranchDetail" class="dfsBranchDetail hidden"></div>
         </section>
       </div>
@@ -577,27 +557,6 @@ async function loadPageDetail(pageName) {
     el('overlayStatus').textContent = result.message;
     el('overlayStatus').classList.remove('hidden');
   };
-  const specialForm = box.querySelector('#specialManualForm');
-  specialForm.onsubmit = async (event) => {
-    event.preventDefault();
-    let special;
-    try {
-      special = JSON.parse(specialForm.elements.special.value || '{}');
-      if (!special || Array.isArray(special) || typeof special !== 'object') throw new Error('必须是 JSON 对象');
-    } catch (error) {
-      el('error').textContent = `special 格式错误：${error.message}`;
-      el('error').classList.remove('hidden');
-      return;
-    }
-    const result = await postJson('/api/console_action', {
-      action: 'maintain_special_dfs',
-      payload: { page_name: data.page_name, special },
-    });
-    if (!result) return;
-    await loadPageDetail(data.page_name);
-    el('overlayStatus').textContent = result.message;
-    el('overlayStatus').classList.remove('hidden');
-  };
   box.onclick = async (event) => {
     const button = event.target.closest('button[data-action]');
     if (!button) return;
@@ -637,16 +596,6 @@ async function loadPageDetail(pageName) {
       });
       if (!result) return;
       await refreshDirectory();
-      await loadPageDetail(data.page_name);
-      el('overlayStatus').textContent = result.message;
-      el('overlayStatus').classList.remove('hidden');
-    } else if (action === 'reset-special-dfs') {
-      if (!confirm('确认删除本页人工 special DFS 配置并恢复自动生成？')) return;
-      const result = await postJson('/api/console_action', {
-        action: 'maintain_special_dfs',
-        payload: { page_name: data.page_name, clear: true },
-      });
-      if (!result) return;
       await loadPageDetail(data.page_name);
       el('overlayStatus').textContent = result.message;
       el('overlayStatus').classList.remove('hidden');
