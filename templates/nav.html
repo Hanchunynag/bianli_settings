@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>设置导航录制 Web 控制台</title>
-  <link rel="stylesheet" href="../static/nav.css?v=follow-active-page-12" />
+  <link rel="stylesheet" href="../static/nav.css?v=profile-request-scope-14" />
 </head>
 <body>
   <header class="topbar">
@@ -42,6 +42,14 @@
       </details>
     </div>
   </header>
+  <section class="profileBar" aria-label="设置版本与机型配置">
+    <div class="profileContext">
+      <strong>当前适配配置</strong>
+      <select id="settingsProfileSelect" aria-label="选择设置版本与机型配置"></select>
+      <button id="openProfileManagerBtn" class="secondary compact" type="button">版本 / 机型维护</button>
+    </div>
+    <div id="profileInheritance" class="profileInheritance">默认配置 · 使用原始配置文件</div>
+  </section>
   <div id="loading" class="loading hidden">正在执行，请稍候…</div>
   <main class="layout">
     <section class="panel screenPanel">
@@ -75,6 +83,41 @@
       <pre id="graphBox" class="graphBox hidden"></pre>
     </section>
   </main>
-  <script type="module" src="../static/nav.js?v=follow-active-page-12"></script>
+  <dialog id="settingsProfileDialog" class="settingsProfileDialog">
+    <div class="profileDialogHeader">
+      <div>
+        <h2>设置版本 / 机型配置</h2>
+        <p>新配置会完整继承所选配置，之后可以独立修改页面、跳转和 DFS。</p>
+      </div>
+      <button id="closeProfileManagerBtn" class="secondary compact" type="button" aria-label="关闭">关闭</button>
+    </div>
+    <div id="settingsProfileList" class="settingsProfileList"></div>
+    <form id="settingsProfileForm" class="settingsProfileForm">
+      <h3>新建适配配置</h3>
+      <label>
+        <span>配置名称（可选）</span>
+        <input name="name" placeholder="例如：Mate X5 · HarmonyOS 5.1" />
+      </label>
+      <div class="profileFormGrid">
+        <label>
+          <span>设置版本</span>
+          <input name="settings_version" placeholder="例如：HarmonyOS 5.1" required />
+        </label>
+        <label>
+          <span>机型</span>
+          <input name="device_model" placeholder="例如：Mate X5" required />
+        </label>
+      </div>
+      <label>
+        <span>继承已有配置</span>
+        <select name="parent_profile_id" id="parentSettingsProfileSelect"></select>
+      </label>
+      <p class="muted">创建时复制父配置的导航图与 DFS；后续只修改新配置，不会覆盖父配置。</p>
+      <div class="profileFormActions">
+        <button class="primary" type="submit">创建并切换</button>
+      </div>
+    </form>
+  </dialog>
+  <script type="module" src="../static/nav.js?v=profile-request-scope-14"></script>
 </body>
 </html>
