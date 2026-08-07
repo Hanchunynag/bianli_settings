@@ -1,0 +1,37 @@
+name: Fix cleaned DFS
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.head_ref == 'cleanup/baseline-only-profile-special'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cleanup/baseline-only-profile-special
+          fetch-depth: 0
+      - name: Fix migration regex and remove workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('DFS.py')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('r"step(\\\\d+)"', 'r"step(\\d+)"')
+          p.write_text(s, encoding='utf-8')
+          PY
+          python -m py_compile DFS.py settings_ui_manual_recorder.py
+          rm -f .github/workflows/fix-clean-dfs.yml
+          git config user.name "cleanup-baseline-bot"
+          git config user.email "cleanup-baseline-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix cleaned DFS migration regex"
+          git push origin HEAD:cleanup/baseline-only-profile-special
