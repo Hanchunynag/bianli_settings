@@ -62,6 +62,37 @@ def test_special_opearte_uses_operation_arrays_and_keeps_popup_order():
     ]
 
 
+def test_special_opearte_order_follows_recorded_group_order():
+    state = {
+        "page_operations": [
+            {
+                "operation_id": "operation9",
+                "effect": "special_capture::later::step1",
+                "operation_kind": "special_operate",
+                "target": _target("later_key", "后执行"),
+            },
+            {
+                "operation_id": "operation10",
+                "effect": "special_capture::later::step2",
+                "operation_kind": "special_operate",
+                "target": _target("later_key_2", "后执行第二步"),
+            },
+            {
+                "operation_id": "operation11",
+                "effect": "special_capture::next::step1",
+                "operation_kind": "special_operate",
+                "target": _target("next_key", "下一组"),
+            },
+        ]
+    }
+
+    special = build_special_operations(state)
+
+    assert list(special) == ["operation1", "operation2"]
+    assert [step["value"] for step in special["operation1"]] == ["later_key", "later_key_2"]
+    assert [step["value"] for step in special["operation2"]] == ["next_key"]
+
+
 def test_manual_page_without_transition_is_exported_after_manual_dfs_is_saved():
     graph = {
         "package_name": "com.example.settings",
