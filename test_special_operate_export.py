@@ -54,12 +54,34 @@ def test_special_opearte_uses_operation_arrays_and_keeps_popup_order():
     assert special["operation1"][1]["value"] == "second_key"
     assert special["operation2"] == [
         {
-            "type": "Dialog",
+            "type": "key",
             "value": "dialog_key",
             "key_description": "打开弹窗",
             "step_prompt": "打开弹窗",
         }
     ]
+
+
+def test_popup_metadata_never_replaces_locator_type():
+    state = {
+        "page_operations": [
+            {
+                "operation_id": "operation_popup",
+                "effect": "open_popup",
+                "popup_type": "SheetWrapper",
+                "target": {
+                    "text": "更多选项",
+                    "type": "SheetWrapper",
+                    "key_description": "打开更多选项弹窗",
+                    "step_prompt": "打开更多选项弹窗",
+                },
+            }
+        ]
+    }
+
+    special = build_special_operations(state)
+    assert special["operation1"][0]["type"] == "text"
+    assert special["operation1"][0]["value"] == "更多选项"
 
 
 def test_special_opearte_order_follows_recorded_group_order():
