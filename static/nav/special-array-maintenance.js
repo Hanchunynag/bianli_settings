@@ -1,10 +1,11 @@
-import { api, postJson } from './api.js?v=special-array-16';
+import { postJson, queryJson } from './api.js?v=special-array-16';
 import { escapeHtml } from './dom.js?v=special-profile-15';
 import { store } from './state.js?v=special-profile-15';
 
 let renderQueued = false;
 let requestGeneration = 0;
 let editorPage = '';
+let editorProfileId = '';
 let operations = [];
 
 function currentDetailPage() {
@@ -184,9 +185,10 @@ function updateFromInput(input) {
 
 async function loadStructure(pageName) {
   const generation = ++requestGeneration;
-  const data = await api(`/api/page_detail?page_name=${encodeURIComponent(pageName)}`);
+  const data = await queryJson(`/api/page_detail?page_name=${encodeURIComponent(pageName)}`);
   if (generation !== requestGeneration || !data?.ok) return false;
   editorPage = pageName;
+  editorProfileId = store.activeSettingsProfileId || 'default';
   operations = groupsFromStructure(data.special_record || {});
   return true;
 }
@@ -249,11 +251,26 @@ async function mountEditor(force = false) {
   const oldDivider = oldForm.previousElementSibling;
   if (oldDivider?.classList.contains('dfsEditorDivider')) oldDivider.hidden = true;
 
-  if (force || editorPage !== pageName) {
+  const activeProfileId = store.activeSettingsProfileId || 'default';
+  const existing = box.querySelector('[data-special-array-maintenance]');
+  if (
+    existing
+    && editorPage === pageName
+    && editorProfileId === activeProfileId
+    && !force
+  ) {
+    return;
+  }
+
+  if (
+    force
+    || editorPage !== pageName
+    || editorProfileId !== activeProfileId
+  ) {
     if (!await loadStructure(pageName)) return;
   }
 
-  box.querySelector('[data-special-array-maintenance]')?.remove();
+  existing?.remove();
   const section = document.createElement('details');
   section.className = 'detailSection';
   section.open = true;
@@ -326,11 +343,5 @@ if (pageDetail) {
     subtree: true,
   });
 }
-
-window.addEventListener('settings-profile-changed', () => {
-  editorPage = '';
-  operations = [];
-  scheduleMount(true);
-});
 
 scheduleMount(true);
