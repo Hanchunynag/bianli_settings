@@ -12,6 +12,7 @@ from DFS import (
     replace_navigation_target_locator,
     sync_descendant_manual_dfs_prefixes,
 )
+from settings_profiles import SettingsProfileManager
 from settings_ui_manual_recorder import (
     DeleteActionRequest,
     GraphMaintenance,
@@ -95,6 +96,203 @@ def hdc_page(title, entry_text, entry_key=""):
 
 
 class GraphMaintenanceTest(unittest.TestCase):
+    def test_settings_profiles_inherit_existing_graph_and_stay_isolated(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_work_dir = Path(temp_dir)
+            baseline_graph = {
+                "package_name": "com.huawei.hmos.settings",
+                "main_page_name": "com.huawei.hmos.settings.MainAbility",
+                "traversal_config": {
+                    "strategy": "dfs",
+                    "root_page": "Pages_root",
+                },
+                "states": {
+                    "Pages_root": state("设置"),
+                    "Pages_wlan": state("WLAN"),
+                },
+                "transitions": [
+                    transition("root-wlan", "Pages_root", "Pages_wlan"),
+                ],
+            }
+            baseline_repository = NavigationGraphRepository(base_work_dir)
+            baseline_repository.save(copy.deepcopy(baseline_graph))
+            baseline_paths = (
+                base_work_dir
+                / "outputs"
+                / "navigation"
+                / "settings_navigation_paths.json"
+            )
+            baseline_paths.write_text(
+                json.dumps([{"page_description": "设置"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            manager = SettingsProfileManager(base_work_dir)
+            created = manager.create(
+                name="Mate X5 适配",
+                settings_version="HarmonyOS 5.1",
+                device_model="Mate X5",
+                parent_profile_id="default",
+            )
+
+            derived_work_dir = manager.profile_work_dir(created["profile_id"])
+            derived_graph = NavigationGraphRepository(derived_work_dir).load()
+            self.assertEqual(
+                set(derived_graph["states"]),
+                {"Pages_root", "Pages_wlan"},
+            )
+            self.assertEqual(
+                derived_graph["settings_profile"]["parent_profile_id"],
+                "default",
+            )
+            self.assertEqual(
+                json.loads((
+                    derived_work_dir
+                    / "outputs"
+                    / "navigation"
+                    / "settings_navigation_paths.json"
+                ).read_text(encoding="utf-8")),
+                [{"page_description": "设置"}],
+            )
+
+            derived_graph["states"]["Pages_variant_only"] = state("机型专属")
+            NavigationGraphRepository(derived_work_dir).save(derived_graph)
+            self.assertNotIn(
+                "Pages_variant_only",
+                baseline_repository.load()["states"],
+            )
+
+            profiles = manager.list_profiles()
+            self.assertEqual(
+                [profile["profile_id"] for profile in profiles],
+                ["default", created["profile_id"]],
+            )
+            self.assertNotIn("is_active", profiles[1])
+            self.assertEqual(profiles[1]["page_count"], 3)
+
+            with self.assertRaisesRegex(ValueError, "已经存在"):
+                manager.create(
+                    name="重复",
+                    settings_version="harmonyos 5.1",
+                    device_model="mate x5",
+                    parent_profile_id="default",
+                )
+
+    def test_frontend_exposes_settings_version_and_device_profile_manager(self):
+        project_dir = Path(__file__).resolve().parent
+        template = (
+            project_dir / "templates" / "nav.html"
+        ).read_text(encoding="utf-8")
+        nav_js = (project_dir / "static" / "nav.js").read_text(
+            encoding="utf-8"
+        )
+        api_js = (
+            project_dir / "static" / "nav" / "api.js"
+        ).read_text(encoding="utf-8")
+        server_py = (project_dir / "web_nav_server.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="settingsProfileSelect"', template)
+        self.assertIn('id="settingsProfileDialog"', template)
+        self.assertIn('name="settings_version"', template)
+        self.assertIn('name="device_model"', template)
+        self.assertIn('name="parent_profile_id"', template)
+        self.assertIn("refreshSettingsProfiles()", nav_js)
+        self.assertIn("switchSettingsProfile(profileId)", nav_js)
+        self.assertIn("'/api/settings_profiles'", nav_js)
+        self.assertNotIn("'/api/settings_profiles/activate'", nav_js)
+        self.assertIn("store.activeSettingsProfileId = profileId", nav_js)
+        self.assertIn("window.sessionStorage.setItem(", nav_js)
+        self.assertIn("url.searchParams.set(", api_js)
+        self.assertIn("'profile_id'", api_js)
+        self.assertIn("document.querySelectorAll('button, select')", api_js)
+        self.assertIn("REQUEST_SETTINGS_PROFILE_ID: ContextVar[str]", server_py)
+        self.assertIn('request.query_params.get("profile_id")', server_py)
+        self.assertNotIn('profile-ui.js', template)
+        self.assertNotIn('profile.css', template)
+
+    @unittest.skipIf(web_nav_server is None, "FastAPI dependency is not installed")
+    def test_profile_id_query_isolates_dfs_writes_per_request(self):
+        original_config = web_nav_server.config
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                base_work_dir = Path(temp_dir)
+                NavigationGraphRepository(base_work_dir).save({
+                    "package_name": "com.huawei.hmos.settings",
+                    "main_page_name": "com.huawei.hmos.settings.MainAbility",
+                    "traversal_config": {"root_page": "Pages_root"},
+                    "states": {
+                        "Pages_root": {
+                            **state("设置"),
+                            "page_name": "Pages_root",
+                        },
+                    },
+                    "transitions": [],
+                })
+                manager = SettingsProfileManager(base_work_dir)
+                first = manager.create(
+                    name="机型 A",
+                    settings_version="V1",
+                    device_model="A",
+                    parent_profile_id="default",
+                )
+                second = manager.create(
+                    name="机型 B",
+                    settings_version="V1",
+                    device_model="B",
+                    parent_profile_id="default",
+                )
+                web_nav_server.config = web_nav_server.ServerConfig(
+                    work_dir=base_work_dir
+                )
+                client = TestClient(web_nav_server.app)
+
+                for profile, description in (
+                    (first, "机型A设置"),
+                    (second, "机型B设置"),
+                ):
+                    response = client.post(
+                        (
+                            "/api/console_action"
+                            f"?profile_id={profile['profile_id']}"
+                        ),
+                        json={
+                            "action": "maintain_page_dfs",
+                            "payload": {
+                                "page_name": "Pages_root",
+                                "package_name": "com.huawei.hmos.settings",
+                                "main_page_name": (
+                                    "com.huawei.hmos.settings.MainAbility"
+                                ),
+                                "page_description": description,
+                                "path_snapshot": [],
+                            },
+                        },
+                    ).json()
+                    self.assertTrue(response["ok"])
+
+                first_graph = NavigationGraphRepository(
+                    manager.profile_work_dir(first["profile_id"])
+                ).load()
+                second_graph = NavigationGraphRepository(
+                    manager.profile_work_dir(second["profile_id"])
+                ).load()
+                self.assertEqual(
+                    first_graph["states"]["Pages_root"]["dfs_manual"][
+                        "page_description"
+                    ],
+                    "机型A设置",
+                )
+                self.assertEqual(
+                    second_graph["states"]["Pages_root"]["dfs_manual"][
+                        "page_description"
+                    ],
+                    "机型B设置",
+                )
+        finally:
+            web_nav_server.config = original_config
+
     def test_directory_hover_keeps_fixed_layout_and_uses_overflow_menu(self):
         project_dir = Path(__file__).resolve().parent
         css = (project_dir / "static" / "nav.css").read_text(encoding="utf-8")
@@ -657,7 +855,7 @@ class GraphMaintenanceTest(unittest.TestCase):
         )
         directory = build_page_directory(graph)
 
-        self.assertEqual(output[1], graph["states"]["Pages_font"]["dfs_manual"])
+        self.assertEqual(output[1], {**graph["states"]["Pages_font"]["dfs_manual"], "special": {}})
         self.assertEqual(
             directory["items"][0]["children"][0]["title"],
             "字体样式",
