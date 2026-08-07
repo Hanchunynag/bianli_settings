@@ -6,8 +6,10 @@ The public/persisted DFS shape is always::
 
     special_opearte.operationN = [locator, locator, ...]
 
-Array order is execution order.  There are deliberately no ``step1`` /
+Array order is execution order. There are deliberately no ``step1`` /
 ``step2`` keys and no ``kind`` / ``operate`` wrapper fields in exported DFS.
+Every exported locator keeps the same four fields as page path locators:
+``type``, ``value``, ``key_description`` and ``step_prompt``.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ SPECIAL_ITEM_FIELDS = ("type", "value", "key_description", "step_prompt")
 
 
 def _normalize_item(value: Any, *, location: str) -> Dict[str, Any]:
+    """Normalize one special locator to the fixed four-field DFS schema."""
     if not isinstance(value, dict):
         raise ValueError(f"{location} 必须是 JSON 对象")
     locator_type = str(value.get("type") or "").strip()
@@ -29,15 +32,25 @@ def _normalize_item(value: Any, *, location: str) -> Dict[str, Any]:
         raise ValueError(f"{location}.type 只能是 key 或 text")
     if locator_value in (None, "", []):
         raise ValueError(f"{location}.value 不能为空")
-    item: Dict[str, Any] = {
+
+    description = str(
+        value.get("key_description")
+        or value.get("step_prompt")
+        or locator_value
+        or ""
+    ).strip()
+    prompt = str(
+        value.get("step_prompt")
+        or value.get("key_description")
+        or locator_value
+        or ""
+    ).strip()
+    return {
         "type": locator_type,
         "value": locator_value,
+        "key_description": description,
+        "step_prompt": prompt,
     }
-    for field in ("key_description", "step_prompt"):
-        text = str(value.get(field) or "").strip()
-        if text:
-            item[field] = text
-    return item
 
 
 def _legacy_step_items(raw_group: Dict[str, Any], *, operation_index: int) -> List[Dict[str, Any]]:
@@ -47,7 +60,7 @@ def _legacy_step_items(raw_group: Dict[str, Any], *, operation_index: int) -> Li
         match = re.fullmatch(r"step(\d+)", str(key))
         if not match:
             continue
-        # PR#19 added ``operate`` inside a step.  It is execution metadata, not
+        # PR#19 added ``operate`` inside a step. It is execution metadata, not
         # part of the locator contract, so normalization intentionally drops it.
         indexed.append((
             int(match.group(1)),
@@ -62,7 +75,7 @@ def _legacy_step_items(raw_group: Dict[str, Any], *, operation_index: int) -> Li
 def normalize_special_opearte(value: Any) -> Dict[str, List[Dict[str, Any]]]:
     """Normalize manual data to ``operationN -> [item, ...]``.
 
-    The desired array form is authoritative.  The short-lived PR#19
+    The desired array form is authoritative. The short-lived PR#19
     ``operateN -> {step1: ..., step2: ...}`` form is accepted only so existing
     data can be migrated without loss; it is never emitted again.
     """
@@ -96,7 +109,7 @@ def normalize_special_opearte(value: Any) -> Dict[str, List[Dict[str, Any]]]:
 
 
 def format_special_item(operation: Any) -> Dict[str, Any]:
-    """Convert one recorded operation to the executable locator item."""
+    """Convert one recorded operation to the executable four-field locator."""
     if not isinstance(operation, dict):
         return {}
     target = operation.get("target")
@@ -116,7 +129,7 @@ def format_special_item(operation: Any) -> Dict[str, Any]:
         locator_type, locator_value = raw_type, raw_value
     else:
         # Popup recording may keep Dialog/SheetWrapper/MenuWrapper in
-        # target.type.  Popup type is metadata, never a locator type.
+        # target.type. Popup type is metadata, never a locator type.
         if raw_value in (None, "", []):
             return {}
         locator_type, locator_value = "text", raw_value
@@ -135,15 +148,12 @@ def format_special_item(operation: Any) -> Dict[str, Any]:
         or locator_value
         or ""
     ).strip()
-    result: Dict[str, Any] = {
+    return {
         "type": locator_type,
         "value": locator_value,
+        "key_description": description,
+        "step_prompt": prompt,
     }
-    if description:
-        result["key_description"] = description
-    if prompt:
-        result["step_prompt"] = prompt
-    return result
 
 
 def _session_id(effect: Any) -> str:
@@ -152,8 +162,8 @@ def _session_id(effect: Any) -> str:
     if not value.startswith(SPECIAL_EFFECT_PREFIX):
         return ""
     remainder = value[len(SPECIAL_EFFECT_PREFIX):]
-    # New recordings use special_capture::<session>.  Old recordings may still
-    # contain special_capture::<session>::stepN; both become the same array.
+    # Recordings may contain special_capture::<session>::stepN internally;
+    # every item from the same session still becomes one ordered operation array.
     return remainder.split("::", 1)[0].strip()
 
 
@@ -211,11 +221,7 @@ def build_special_opearte(state: Any) -> Dict[str, List[Dict[str, Any]]]:
 
 
 def install_dfs_contract() -> None:
-    """Install the canonical contract into the existing DFS module.
-
-    This keeps the request-scoped profile integration intact while correcting
-    the accidental PR#19 schema rewrite without duplicating the large DFS file.
-    """
+    """Install the canonical contract into the existing DFS module."""
     import DFS as dfs
 
     dfs.DFS_RECORD_FIELDS = (
