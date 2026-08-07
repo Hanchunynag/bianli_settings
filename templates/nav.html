@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>设置导航录制 Web 控制台</title>
-  <link rel="stylesheet" href="../static/nav.css?v=page-identity-13" />
+  <link rel="stylesheet" href="../static/nav.css?v=special-operate-14" />
 </head>
 <body>
   <header class="topbar">
@@ -33,12 +33,15 @@
             <button class="secondary popupTypeButton" data-popup-type="MenuWrapper">采集弹窗-MenuWrapper</button>
           </div>
           <div class="actionGroup">
-            <div class="actionGroupTitle">页面内操作</div>
-            <button id="special_opeartebutton" class="secondary popupTypeButton" aria-pressed="false">录制当前页面操作</button>
+            <div class="actionGroupTitle">Special Operate</div>
+            <button id="special_opeartebutton" class="secondary popupTypeButton" aria-pressed="false">开始特殊操作</button>
+            <button id="finishSpecialOperateBtn" class="secondary" disabled>完成特殊操作</button>
+            <button id="cancelSpecialOperateBtn" class="danger" disabled>取消特殊操作</button>
           </div>
           <div class="actionGroup">
-            <div class="actionGroupTitle">页面身份</div>
+            <div class="actionGroupTitle">页面身份 / 人工页面</div>
             <button id="bindCurrentPageBtn" class="secondary">指定所选页面为当前页面</button>
+            <button id="addAndBindCurrentPageBtn" class="secondary">新增并绑定当前页面</button>
           </div>
           <div class="actionGroup">
             <div class="actionGroupTitle">维护</div>
@@ -83,6 +86,6 @@
       <pre id="graphBox" class="graphBox hidden"></pre>
     </section>
   </main>
-  <script type="module" src="../static/nav.js?v=page-identity-13"></script>
+  <script type="module" src="../static/nav.js?v=special-operate-14"></script>
 </body>
 </html>
