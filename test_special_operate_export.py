@@ -9,7 +9,7 @@ def _target(key: str, description: str):
     }
 
 
-def test_special_operate_groups_multiple_steps_and_keeps_popup_order():
+def test_special_opearte_uses_operation_arrays_and_keeps_popup_order():
     state = {
         "page_operations": [
             {
@@ -27,6 +27,12 @@ def test_special_operate_groups_multiple_steps_and_keeps_popup_order():
                 "target": _target("second_key", "第二步"),
             },
             {
+                "operation_id": "ordinary_same_page",
+                "operate": "tap",
+                "effect": "content_changed",
+                "target": _target("ordinary_key", "普通同页操作"),
+            },
+            {
                 "operation_id": "operation3",
                 "operate": "tap",
                 "effect": "open_popup",
@@ -41,13 +47,19 @@ def test_special_operate_groups_multiple_steps_and_keeps_popup_order():
 
     special = build_special_operations(state)
 
-    assert list(special) == ["operate1", "operate2"]
-    assert special["operate1"]["kind"] == "special_operate"
-    assert special["operate1"]["step1"]["value"] == "first_key"
-    assert special["operate1"]["step2"]["value"] == "second_key"
-    assert special["operate2"]["kind"] == "popup"
-    assert special["operate2"]["popup_type"] == "Dialog"
-    assert special["operate2"]["step1"]["value"] == "dialog_key"
+    assert list(special) == ["operation1", "operation2"]
+    assert len(special["operation1"]) == 2
+    assert special["operation1"][0]["type"] == "key"
+    assert special["operation1"][0]["value"] == "first_key"
+    assert special["operation1"][1]["value"] == "second_key"
+    assert special["operation2"] == [
+        {
+            "type": "Dialog",
+            "value": "dialog_key",
+            "key_description": "打开弹窗",
+            "step_prompt": "打开弹窗",
+        }
+    ]
 
 
 def test_manual_page_without_transition_is_exported_after_manual_dfs_is_saved():
@@ -90,4 +102,4 @@ def test_manual_page_without_transition_is_exported_after_manual_dfs_is_saved():
     assert len(output) == 2
     assert output[1]["page_description"] == "设置_人工页面"
     assert output[1]["path_snapshot"][0]["value"] == "人工入口"
-    assert output[1]["special"] == {}
+    assert output[1]["special_opearte"] == {}
