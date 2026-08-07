@@ -542,7 +542,7 @@ def read_current_state(
         "pending": pending,
         "pending_action_chain": action_chain,
         "warning": warning,
-        "screenshot_url": f"/screen?t={int(time.time() * 1000)}",
+        "screenshot_url": f"/screen?profile_id={config.profile_id}&t={int(time.time() * 1000)}",
         "screen_metrics": screen_metrics_from_root(root_json),
         "settings_profile": config.settings_profiles.get_profile(
             config.profile_id
@@ -1295,6 +1295,7 @@ def api_import_settings_profile(
         settings_version=req.settings_version,
         device_model=req.device_model,
         source_filename=req.source_filename,
+        source_work_dir=req.source_work_dir,
         graph=req.graph,
     )
     profile_work_dir = config.settings_profiles.profile_work_dir(
@@ -1307,10 +1308,15 @@ def api_import_settings_profile(
         page_count=len(imported_graph.get("states", {}) or {}),
         transition_count=len(imported_graph.get("transitions", []) or []),
         output_path=compact.get("output_path", ""),
+        copied_latest=(
+            (profile_work_dir / "outputs" / "latest" / "current_screen.png").exists()
+            and (profile_work_dir / "outputs" / "latest" / "current_ui_tree.json").exists()
+        ),
         message=(
-            f"已导入 Graph 并创建配置“{profile.get('name')}”："
+            f"已导入采集目录并创建/更新配置“{profile.get('name')}”："
             f"{len(imported_graph.get('states', {}) or {})} 页面，"
-            f"{len(imported_graph.get('transitions', []) or [])} 跳转。"
+            f"{len(imported_graph.get('transitions', []) or [])} 跳转；"
+            "Graph、latest 采集文件和历史截图均维护在该 profile 本地目录。"
         ),
     )
 

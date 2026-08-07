@@ -806,20 +806,39 @@ class SettingsProfileManager:
         name: str,
         settings_version: str,
         device_model: str,
-        graph: Dict[str, Any],
+        graph: Optional[Dict[str, Any]] = None,
         source_filename: str = "",
+        source_work_dir: str = "",
     ) -> Dict[str, Any]:
-        """Register an already-recorded navigation graph as an independent profile."""
+        """Import one recorded work_dir as an independent profile, including capture assets."""
         name = str(name or "").strip()
         settings_version = str(settings_version or "").strip()
         device_model = str(device_model or "").strip()
         source_filename = Path(str(source_filename or "")).name
+        source_dir: Optional[Path] = None
+        source_work_dir = str(source_work_dir or "").strip()
+        if source_work_dir:
+            source_dir = Path(source_work_dir).expanduser()
+            if not source_dir.is_absolute():
+                source_dir = (self.base_work_dir.resolve().parent / source_dir).resolve()
+            else:
+                source_dir = source_dir.resolve()
+            if not source_dir.exists() or not source_dir.is_dir():
+                raise ValueError(f"源采集目录不存在：{source_dir}")
+            source_graph_path = navigation_graph_path(source_dir)
+            if not source_graph_path.exists():
+                raise ValueError(
+                    "源采集目录缺少 outputs/navigation/settings_navigation_graph.json："
+                    f"{source_graph_path}"
+                )
+            graph = load_navigation_graph(source_dir)
+            source_filename = source_graph_path.name
         if not settings_version:
             raise ValueError("设置版本不能为空")
         if not device_model:
             raise ValueError("机型不能为空")
         if not isinstance(graph, dict):
-            raise ValueError("导入 Graph 必须是 JSON 对象")
+            raise ValueError("导入 Graph 必须是 JSON 对象；推荐填写源采集目录进行完整导入")
 
         imported_graph = json.loads(json.dumps(graph, ensure_ascii=False))
         states = imported_graph.get("states")
@@ -865,23 +884,33 @@ class SettingsProfileManager:
             and str(item.get("device_model") or "").casefold()
             == device_model.casefold()
         ), None)
-        if duplicate:
+        reuse_imported_profile = bool(
+            duplicate
+            and source_dir is not None
+            and str(duplicate.get("source") or "") in {"imported_graph", "imported_work_dir"}
+        )
+        if duplicate and not reuse_imported_profile:
             raise ValueError(
                 f"该设置版本和机型已经存在：{duplicate.get('name') or duplicate['profile_id']}"
             )
 
-        profile_id = f"profile_{uuid.uuid4().hex[:12]}"
-        created_at = now_iso()
+        profile_id = (
+            str(duplicate["profile_id"])
+            if reuse_imported_profile
+            else f"profile_{uuid.uuid4().hex[:12]}"
+        )
+        created_at = str(duplicate.get("created_at") or now_iso()) if reuse_imported_profile else now_iso()
         profile = {
             "profile_id": profile_id,
             "name": name or f"{settings_version} · {device_model}",
             "settings_version": settings_version,
             "device_model": device_model,
             "parent_profile_id": "",
-            "source": "imported_graph",
+            "source": "imported_work_dir" if source_dir is not None else "imported_graph",
             "source_filename": source_filename,
+            "source_work_dir": str(source_dir) if source_dir is not None else "",
             "created_at": created_at,
-            "updated_at": created_at,
+            "updated_at": now_iso(),
             "is_default": False,
         }
         imported_graph["settings_profile"] = {
@@ -894,12 +923,65 @@ class SettingsProfileManager:
                 "parent_profile_id",
                 "source",
                 "source_filename",
+                "source_work_dir",
             )
         }
         target_work_dir = self.profile_work_dir(profile_id)
+
+        if source_dir is not None:
+            source_outputs = source_dir / "outputs"
+            target_outputs = target_work_dir / "outputs"
+            if source_outputs.exists():
+                target_outputs.mkdir(parents=True, exist_ok=True)
+
+                def copy_entry(source: Path, target: Path) -> None:
+                    if source.is_dir():
+                        shutil.copytree(source, target, dirs_exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, target)
+
+                for source_entry in source_outputs.iterdir():
+                    if source_entry.name != "navigation":
+                        copy_entry(source_entry, target_outputs / source_entry.name)
+                        continue
+                    target_navigation = target_outputs / "navigation"
+                    target_navigation.mkdir(parents=True, exist_ok=True)
+                    skip_navigation = {
+                        SETTINGS_PROFILE_REGISTRY,
+                        "settings_navigation_graph.json",
+                        "settings_navigation_paths.json",
+                        "current_path_session.json",
+                        "pending_transition.json",
+                        "pending_action_chain.json",
+                    }
+                    for navigation_entry in source_entry.iterdir():
+                        if navigation_entry.name in skip_navigation:
+                            continue
+                        copy_entry(
+                            navigation_entry,
+                            target_navigation / navigation_entry.name,
+                        )
+
+            capture_dir = (
+                target_work_dir / "outputs" / "navigation" / "continued_captures"
+            )
+            for state in imported_graph.get("states", {}).values():
+                if not isinstance(state, dict):
+                    continue
+                for capture in state.get("continued_captures", []) or []:
+                    if not isinstance(capture, dict) or not capture.get("screenshot"):
+                        continue
+                    copied = capture_dir / Path(str(capture["screenshot"])).name
+                    if copied.exists():
+                        capture["screenshot"] = str(copied)
+
         save_navigation_graph(imported_graph, target_work_dir)
         save_current_path_session(target_work_dir, root_page)
-        profiles.append(profile)
+        if reuse_imported_profile and duplicate is not None:
+            duplicate.update(profile)
+        else:
+            profiles.append(profile)
         self._save_profiles(profiles)
         return profile
 
@@ -1836,8 +1918,9 @@ class ImportSettingsProfileRequest(BaseModel):
     name: str = ""
     settings_version: str
     device_model: str
+    source_work_dir: str = ""
     source_filename: str = ""
-    graph: Dict[str, Any]
+    graph: Optional[Dict[str, Any]] = None
 
 
 # Web session and graph maintenance

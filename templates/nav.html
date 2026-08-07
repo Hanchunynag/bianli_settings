@@ -129,15 +129,15 @@
       </div>
     </form>
     <form id="settingsProfileImportForm" class="settingsProfileForm">
-      <h3>导入已有 Graph</h3>
-      <p class="muted">选择之前采集保存的 settings_navigation_graph.json。导入后会成为独立 profile，不覆盖现有 Graph。</p>
+      <h3>导入已有采集目录</h3>
+      <p class="muted">填写项目本地之前采集好的 work_dir。目录内必须包含 outputs/navigation/settings_navigation_graph.json；outputs/latest、历史截图和其他采集文件会一起复制到新的 profile 目录。</p>
       <label>
-        <span>Graph JSON</span>
-        <input name="graph_file" type="file" accept=".json,application/json" required />
+        <span>源采集目录</span>
+        <input name="source_work_dir" placeholder="例如：demo_settings_matex5_5_0" required />
       </label>
       <label>
         <span>配置名称（可选）</span>
-        <input name="name" placeholder="例如：历史 Mate X5 Graph" />
+        <input name="name" placeholder="例如：历史 Mate X5 采集" />
       </label>
       <div class="profileFormGrid">
         <label>
@@ -150,11 +150,11 @@
         </label>
       </div>
       <div class="profileFormActions">
-        <button class="primary" type="submit">导入并切换</button>
+        <button class="primary" type="submit">导入目录并切换</button>
       </div>
     </form>
   </dialog>
-  <script type="module" src="../static/nav.js?v=graph-import-24"></script>
+  <script type="module" src="../static/nav.js?v=graph-import-assets-25"></script>
   <script type="module" src="../static/nav/special-maintenance.js?v=special-delete-persist-23"></script>
 </body>
 </html>
