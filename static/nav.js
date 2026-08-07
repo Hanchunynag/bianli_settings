@@ -160,11 +160,11 @@ function renderSettingsProfiles(data) {
 
   if (active?.is_default) {
     el('profileInheritance').textContent = '默认配置 · 继续读取原始 work_dir 配置文件';
-  } else if (active?.source === 'imported_graph') {
+  } else if (['imported_graph', 'imported_work_dir'].includes(active?.source)) {
     el('profileInheritance').textContent = [
       active.settings_version,
       active.device_model,
-      `导入 Graph：${active.source_filename || '本地 JSON'}`,
+      active.source === 'imported_work_dir' ? `导入采集目录：${active.source_work_dir || active.source_filename || '-'}` : `导入 Graph：${active.source_filename || '本地 JSON'}`,
     ].filter(Boolean).join(' · ');
   } else if (active) {
     const parent = profileById.get(active.parent_profile_id);
@@ -195,8 +195,8 @@ function renderSettingsProfiles(data) {
           <div class="profileCardSource">
             ${profile.is_default
               ? '直接使用启动参数指定的原始 work_dir'
-              : profile.source === 'imported_graph'
-                ? `导入已有 Graph${profile.source_filename ? `：${escapeHtml(profile.source_filename)}` : ''}`
+              : ['imported_graph', 'imported_work_dir'].includes(profile.source)
+                ? (profile.source === 'imported_work_dir' ? `导入采集目录：${escapeHtml(profile.source_work_dir || profile.source_filename || '-')}` : `导入已有 Graph${profile.source_filename ? `：${escapeHtml(profile.source_filename)}` : ''}`)
                 : `创建时继承：${escapeHtml(parent?.name || profile.parent_profile_id || '默认配置')}`}
           </div>
         </div>
@@ -345,28 +345,16 @@ el('settingsProfileForm').onsubmit = async (event) => {
 el('settingsProfileImportForm').onsubmit = async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const file = form.elements.graph_file.files?.[0];
-  if (!file) {
-    window.alert('请选择 settings_navigation_graph.json。');
-    return;
-  }
-  let graph;
-  try {
-    graph = JSON.parse(await file.text());
-  } catch (error) {
-    window.alert(`Graph JSON 解析失败：${error.message}`);
-    return;
-  }
-  if (!graph || Array.isArray(graph) || typeof graph !== 'object') {
-    window.alert('Graph JSON 顶层必须是对象。');
+  const sourceWorkDir = String(form.elements.source_work_dir.value || '').trim();
+  if (!sourceWorkDir) {
+    window.alert('请填写项目本地的源采集目录。');
     return;
   }
   const result = await postJson('/api/settings_profiles/import', {
     name: form.elements.name.value,
     settings_version: form.elements.settings_version.value,
     device_model: form.elements.device_model.value,
-    source_filename: file.name,
-    graph,
+    source_work_dir: sourceWorkDir,
   });
   if (!result) return;
   store.activeSettingsProfileId = result.profile.profile_id;
