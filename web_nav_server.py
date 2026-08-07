@@ -76,6 +76,7 @@ from DFS import (
     export_dfs_paths,
     format_dfs_records,
     format_path_target,
+    format_special_step,
     replace_navigation_target_locator,
     sync_descendant_manual_dfs_prefixes,
 )
@@ -353,6 +354,41 @@ def maintain_special_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def sync_recorded_special_into_manual(
+    state: Dict[str, Any],
+    operation: Dict[str, Any],
+) -> bool:
+    """Keep an existing manual special DFS live while recording new steps."""
+    manual = state.get(SPECIAL_MANUAL_FIELD)
+    if not isinstance(manual, dict):
+        return False
+
+    step = format_special_step(operation)
+    if not step:
+        return False
+
+    special = normalize_special(manual)
+    effect = str(operation.get("effect") or "").strip()
+    parts = effect.split("::")
+    step_index = 1
+    if (
+        len(parts) >= 3
+        and parts[0] == "special_capture"
+        and parts[2].startswith("step")
+        and parts[2][4:].isdigit()
+    ):
+        step_index = int(parts[2][4:])
+
+    if step_index > 1 and special:
+        last_operation = next(reversed(special))
+        special[last_operation].append(step)
+    else:
+        special[f"operation{len(special) + 1}"] = [step]
+
+    state[SPECIAL_MANUAL_FIELD] = special
+    return True
+
+
 def cancel_special_capture(payload: Dict[str, Any]) -> Dict[str, Any]:
     page_name = str(payload.get("page_name") or "").strip()
     session_id = str(payload.get("session_id") or "").strip()
@@ -365,14 +401,30 @@ def cancel_special_capture(payload: Dict[str, Any]) -> Dict[str, Any]:
     prefix = f"special_capture::{session_id}::"
     operations = state.get("special_operations")
     removed = 0
+    removed_operations: List[Dict[str, Any]] = []
     if isinstance(operations, list):
         kept = []
         for operation in operations:
             if isinstance(operation, dict) and str(operation.get("effect") or "").startswith(prefix):
                 removed += 1
+                removed_operations.append(operation)
             else:
                 kept.append(operation)
         state["special_operations"] = kept
+
+    manual = state.get(SPECIAL_MANUAL_FIELD)
+    if isinstance(manual, dict) and removed_operations:
+        normalized_manual = normalize_special(manual)
+        recorded_group = [
+            step
+            for operation in removed_operations
+            if (step := format_special_step(operation))
+        ]
+        if normalized_manual and recorded_group:
+            last_operation = next(reversed(normalized_manual))
+            if normalized_manual.get(last_operation) == recorded_group:
+                normalized_manual.pop(last_operation, None)
+                state[SPECIAL_MANUAL_FIELD] = normalized_manual
     config.graphs.save(graph)
     return {**read_current_state(capture=False), "message": f"已取消本组 special 采集并回滚 {removed} 步。"}
 
@@ -855,6 +907,8 @@ def record_page_operation(
     if mode not in {"popup", "special"}:
         operations[:] = [item for item in operations if item.get("operation_id") != operation_id]
     operations.append(operation)
+    if mode == "special":
+        sync_recorded_special_into_manual(state, operation)
     upsert_clicked_target_as_candidate(graph, active_page, target, operation_id=operation_id)
     if mode == "same_page":
         variant_payload = [
