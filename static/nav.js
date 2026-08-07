@@ -6,29 +6,128 @@ import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=follow-
 const popupTypeButtons = [...document.querySelectorAll('[data-popup-type]')];
 const popupTypes = new Set(popupTypeButtons.map((button) => button.dataset.popupType));
 const specialOperateButton = el('special_opeartebutton');
-let specialOperateMode = false;
+const finishSpecialButton = el('finishSpecialOperateBtn');
+const cancelSpecialButton = el('cancelSpecialOperateBtn');
+let specialCapture = null;
 
-function renderSpecialOperateHint() {
-  if (!specialOperateMode) return;
+function currentPageName() {
+  return String(
+    store.data?.active_page
+    || store.data?.active_state?.page_name
+    || store.data?.state?.page_name
+    || '',
+  ).trim();
+}
+
+function specialEffect(sessionId, stepIndex) {
+  return `special_capture::${sessionId}::step${stepIndex}`;
+}
+
+function pageOperations(data) {
+  return data?.active_state?.page_operations
+    || data?.state?.page_operations
+    || [];
+}
+
+function syncSpecialOperationIds(data) {
+  if (!specialCapture) return;
+  const prefix = `special_capture::${specialCapture.id}::`;
+  specialCapture.operationIds = pageOperations(data)
+    .filter((operation) => String(operation?.effect || '').startsWith(prefix))
+    .map((operation) => String(operation?.operation_id || '').trim())
+    .filter(Boolean);
+}
+
+function renderSpecialOperateHint(message = '') {
   const status = el('overlayStatus');
-  status.textContent = '单次采集：当前页面操作。点击截图中的控件后只允许保存同页操作；若发生页面跳转则拒绝保存。';
+  if (!specialCapture) return;
+  status.textContent = message || (
+    `正在录制 special_operate：${specialCapture.pageName}，已保存 ${specialCapture.stepCount} 步。`
+    + '继续点击截图录制下一步；完成后点“完成特殊操作”，放弃本组请点“取消特殊操作”。'
+  );
   status.classList.remove('hidden');
 }
 
-function selectSpecialOperate(enabled, rerender = true) {
-  specialOperateMode = Boolean(enabled);
-  if (specialOperateMode && store.popupType) selectPopupType(null, false);
-  specialOperateButton.classList.toggle('isArmed', specialOperateMode);
-  specialOperateButton.setAttribute('aria-pressed', String(specialOperateMode));
-  if (rerender) {
-    render(store.data);
-    renderSpecialOperateHint();
+function refreshSpecialButtons() {
+  const armed = Boolean(specialCapture);
+  specialOperateButton.classList.toggle('isArmed', armed);
+  specialOperateButton.setAttribute('aria-pressed', String(armed));
+  specialOperateButton.disabled = armed;
+  finishSpecialButton.disabled = !armed;
+  cancelSpecialButton.disabled = !armed;
+}
+
+function startSpecialOperate() {
+  const pageName = currentPageName();
+  if (!pageName) {
+    window.alert('当前页面尚未确定，请先采集或绑定当前页面。');
+    return;
   }
+  if (store.popupType) selectPopupType(null, false);
+  const sessionId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+  specialCapture = {
+    id: sessionId,
+    pageName,
+    stepCount: 0,
+    operationIds: [],
+  };
+  refreshSpecialButtons();
+  render(store.data);
+  renderSpecialOperateHint();
+}
+
+function finishSpecialOperate() {
+  if (!specialCapture) return;
+  if (!specialCapture.stepCount) {
+    window.alert('当前 special_operate 还没有录制任何步骤。');
+    return;
+  }
+  const count = specialCapture.stepCount;
+  specialCapture = null;
+  refreshSpecialButtons();
+  render(store.data);
+  const status = el('overlayStatus');
+  status.textContent = `已完成一组 special_operate，共 ${count} 步；DFS 导出时会作为同一个 operateN 输出。`;
+  status.classList.remove('hidden');
+}
+
+async function rollbackSpecialOperate() {
+  if (!specialCapture) return;
+  const capture = specialCapture;
+  specialCapture = null;
+  refreshSpecialButtons();
+  for (const operationId of capture.operationIds) {
+    const body = {
+      page_name: capture.pageName,
+      operation_id: operationId,
+      delete_revealed_candidates: false,
+    };
+    const preview = await postJson('/api/delete_action', {
+      target_type: 'page_operation',
+      payload: body,
+      dry_run: true,
+    });
+    if (!preview?.preview_token) continue;
+    await postJson('/api/delete_action', {
+      target_type: 'page_operation',
+      payload: body,
+      dry_run: false,
+      preview_token: preview.preview_token,
+    });
+  }
+  const data = await api('/api/state');
+  renderFollowingActivePage(data);
+  const status = el('overlayStatus');
+  status.textContent = `已取消本组 special_operate，并回滚 ${capture.operationIds.length} 个已录步骤。`;
+  status.classList.remove('hidden');
 }
 
 function selectPopupType(popupType = null, rerender = true) {
+  if (popupType && specialCapture) {
+    window.alert('当前正在录制多步 special_operate，请先完成或取消本组采集，再录制弹窗。');
+    return;
+  }
   store.popupType = popupType && popupTypes.has(popupType) ? popupType : null;
-  if (store.popupType && specialOperateMode) selectSpecialOperate(false, false);
   popupTypeButtons.forEach((button) => {
     const selected = button.dataset.popupType === store.popupType;
     button.classList.toggle('isArmed', selected);
@@ -42,6 +141,8 @@ function renderFollowingActivePage(data) {
   store.selectedPage = null;
   store.showingOrphans = false;
   render(data);
+  refreshSpecialButtons();
+  if (specialCapture) renderSpecialOperateHint();
 }
 
 el('captureBtn').onclick = async () => renderFollowingActivePage(
@@ -55,7 +156,10 @@ el('orphanBtn').onclick = refreshOrphans;
 popupTypeButtons.forEach((button) => {
   button.onclick = () => selectPopupType(button.dataset.popupType);
 });
-specialOperateButton.onclick = () => selectSpecialOperate(!specialOperateMode);
+specialOperateButton.onclick = startSpecialOperate;
+finishSpecialButton.onclick = finishSpecialOperate;
+cancelSpecialButton.onclick = rollbackSpecialOperate;
+
 el('bindCurrentPageBtn').onclick = async () => {
   const pageName = String(store.selectedPage || '').trim();
   if (!pageName) {
@@ -68,6 +172,51 @@ el('bindCurrentPageBtn').onclick = async () => {
   });
   renderFollowingActivePage(data);
 };
+
+el('addAndBindCurrentPageBtn').onclick = async () => {
+  const captured = await postJson('/api/console_action', {
+    action: 'capture_current',
+    payload: {},
+  });
+  if (!captured) return;
+  const detectedName = String(
+    captured.active_page
+    || captured.state?.page_name
+    || '',
+  ).trim();
+  if (!detectedName || detectedName === 'Pages_root') {
+    window.alert('当前页面不能作为新的人工页面创建。');
+    return;
+  }
+  if (
+    detectedName !== 'Pages_page'
+    && !window.confirm(`当前页面已经识别为 ${detectedName}。继续会把这个页面改名后作为人工页面绑定，是否继续？`)
+  ) return;
+
+  let newName = window.prompt('请输入新的内部页面 ID，例如 Pages_高级设置：', detectedName === 'Pages_page' ? 'Pages_' : detectedName);
+  if (!newName) return;
+  newName = newName.trim();
+  if (!newName.startsWith('Pages_')) newName = `Pages_${newName}`;
+  const newTitle = window.prompt('请输入页面显示名称（无标题页建议人工填写）：', newName.replace(/^Pages_/, '')) || '';
+
+  if (newName !== detectedName || newTitle) {
+    const renamed = await postJson('/api/rename_page', {
+      old_page_name: detectedName,
+      new_page_name: newName,
+      new_title: newTitle,
+    });
+    if (!renamed) return;
+  }
+  const bound = await postJson('/api/console_action', {
+    action: 'bind_current_page',
+    payload: { page_name: newName },
+  });
+  renderFollowingActivePage(bound);
+  const status = el('overlayStatus');
+  status.textContent = `已新增并绑定人工页面 ${newName}。请在右侧页面详情中继续人工维护该页面 DFS。`;
+  status.classList.remove('hidden');
+};
+
 el('graphBtn').onclick = async () => {
   const data = await api('/api/graph');
   if (!data) return;
@@ -86,12 +235,17 @@ el('screen').addEventListener('click', async (event) => {
     manual_label: '',
   };
   const popupType = store.popupType;
-  const samePageMode = specialOperateMode;
-  const action = popupType ? 'popup_tap' : samePageMode ? 'same_page_tap' : 'tap_point';
+  const special = specialCapture;
+  const nextSpecialStep = special ? special.stepCount + 1 : 0;
+  const action = popupType ? 'popup_tap' : special ? 'same_page_gesture' : 'tap_point';
   const payload = popupType
     ? { ...point, popup_type: popupType }
-    : samePageMode
-      ? point
+    : special
+      ? {
+          ...point,
+          operate: 'tap',
+          effect: specialEffect(special.id, nextSpecialStep),
+        }
       : { ...point, expect: 'new_page', effect: '' };
   let data = null;
   try {
@@ -102,10 +256,24 @@ el('screen').addEventListener('click', async (event) => {
     }
   } finally {
     if (popupType) selectPopupType(null, false);
-    if (samePageMode) selectSpecialOperate(false, false);
+  }
+  if (!data) {
+    if (specialCapture) renderSpecialOperateHint('本步没有保存；仍处于 special_operate 采集状态，可继续操作或取消。');
+    return;
+  }
+  if (specialCapture) {
+    specialCapture.stepCount = nextSpecialStep;
+    syncSpecialOperationIds(data);
+    render(data);
+    refreshSpecialButtons();
+    renderSpecialOperateHint();
+    return;
   }
   renderFollowingActivePage(data);
 });
 
 window.addEventListener('resize', renderOverlay);
-api('/api/state').then(render);
+api('/api/state').then((data) => {
+  render(data);
+  refreshSpecialButtons();
+});
