@@ -1,0 +1,101 @@
+name: Patch DFS invalid transition
+on:
+  push:
+    branches:
+      - fix/dfs-invalid-transition
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/dfs-invalid-transition
+      - name: Patch DFS completeness handling
+        shell: python
+        run: |
+          from pathlib import Path
+
+          # DFS.py: only traverse transitions whose every recorded step has a valid key/text locator.
+          path = Path('DFS.py')
+          text = path.read_text(encoding='utf-8')
+          anchor = '''def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]], List[str]]:\n'''
+          helper = '''def transition_dfs_targets(transition: Any) -> Optional[List[Target]]:\n    \"\"\"Return executable DFS locators for one transition, or None when incomplete.\"\"\"\n    if not isinstance(transition, dict):\n        return None\n    steps = transition.get(\"steps\")\n    if not isinstance(steps, list) or not steps:\n        target = transition.get(\"target\")\n        steps = [\n            {\"operate\": transition.get(\"operate\") or \"tap\", \"target\": target}\n        ] if isinstance(target, dict) and target else []\n    if not steps:\n        return None\n\n    targets: List[Target] = []\n    for step in steps:\n        if not isinstance(step, dict):\n            return None\n        formatted = format_path_target(step.get(\"target\"))\n        if not formatted:\n            return None\n        targets.append(formatted)\n    return targets\n\n\n'''
+          if anchor not in text:
+              raise SystemExit('DFS export anchor not found')
+          text = text.replace(anchor, helper + anchor, 1)
+
+          old = '''            steps = transition.get(\"steps\")\n            if not isinstance(steps, list) or not steps:\n                target = transition.get(\"target\")\n                steps = [{\"operate\": transition.get(\"operate\") or \"tap\", \"target\": target}] if isinstance(target, dict) and target else []\n            targets = [compact_target(step.get(\"target\")) for step in steps if isinstance(step, dict)]\n            child_state = states.get(to_page, {})'''
+          new = '''            targets = transition_dfs_targets(transition)\n            if targets is None:\n                continue\n            child_state = states.get(to_page, {})'''
+          if old not in text:
+              raise SystemExit('DFS transition block not found')
+          text = text.replace(old, new, 1)
+          old = '''                [*path_snapshot, *(target for target in targets if target)],\n'''
+          new = '''                [*path_snapshot, *targets],\n'''
+          if old not in text:
+              raise SystemExit('DFS path append anchor not found')
+          text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+
+          # web_nav_server.py: expose why automatic DFS is unavailable instead of returning a misleading parent-only path.
+          path = Path('web_nav_server.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''    format_path_target,\n    format_special_step,\n'''
+          new = '''    format_path_target,\n    format_special_step,\n    transition_dfs_targets,\n'''
+          if old not in text:
+              raise SystemExit('DFS import anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    transitions = graph.get(\"transitions\", [])\n    dfs_record = dfs_record_for_page(graph, page_name) or {\n        \"package_name\": str(graph.get(\"package_name\") or \"\"),\n        \"main_page_name\": str(graph.get(\"main_page_name\") or \"\"),\n        \"page_description\": str(\n            state.get(\"last_title\") or state.get(\"page_description\") or page_name\n        ),\n        \"path_snapshot\": [],\n    }\n'''
+          new = '''    transitions = graph.get(\"transitions\", [])\n    generated_dfs_record = dfs_record_for_page(graph, page_name)\n    root_page = str(graph.get(\"traversal_config\", {}).get(\"root_page\") or \"Pages_root\")\n    dfs_issue = \"\"\n    if generated_dfs_record is None and page_name != root_page:\n        incoming = [\n            item for item in transitions\n            if isinstance(item, dict) and item.get(\"to_page\") == page_name\n        ]\n        direct_invalid = [\n            item for item in incoming\n            if transition_dfs_targets(item) is None\n        ]\n        if direct_invalid:\n            dfs_issue = (\n                \"当前页面已绑定父级，但进入该页面的跳转缺少可执行 key/text locator；\"\n                \"自动 DFS 不会继承父页面路径，请人工维护缺失的最后一步。\"\n            )\n        elif incoming:\n            dfs_issue = (\n                \"当前页面存在进入跳转，但上游路径中有缺失的 key/text locator；\"\n                \"自动 DFS 暂不可达。\"\n            )\n        else:\n            dfs_issue = \"当前页面没有从根页面可达的完整跳转路径，自动 DFS 暂不可用。\"\n    dfs_record = generated_dfs_record or {\n        \"package_name\": str(graph.get(\"package_name\") or \"\"),\n        \"main_page_name\": str(graph.get(\"main_page_name\") or \"\"),\n        \"page_description\": str(\n            state.get(\"last_title\") or state.get(\"page_description\") or page_name\n        ),\n        \"path_snapshot\": [],\n    }\n'''
+          if old not in text:
+              raise SystemExit('page detail DFS anchor not found')
+          text = text.replace(old, new, 1)
+          old = '''        dfs_record=dfs_record,\n        dfs_manual=state.get(DFS_MANUAL_FIELD),\n'''
+          new = '''        dfs_record=dfs_record,\n        dfs_manual=state.get(DFS_MANUAL_FIELD),\n        dfs_issue=dfs_issue,\n'''
+          if old not in text:
+              raise SystemExit('page detail response anchor not found')
+          text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+
+          # render.js: clearly show incomplete automatic DFS instead of calling it a valid generated route.
+          path = Path('static/nav/render.js')
+          text = path.read_text(encoding='utf-8')
+          old = '''  const dfsIsManual = Boolean(data.dfs_manual);\n  const recordDisplayName = (record) => {'''
+          new = '''  const dfsIsManual = Boolean(data.dfs_manual);\n  const dfsIssue = String(data.dfs_issue || '').trim();\n  const dfsStatusLabel = dfsIsManual ? '人工配置' : (dfsIssue ? '待维护' : '自动生成');\n  const recordDisplayName = (record) => {'''
+          if old not in text:
+              raise SystemExit('render DFS variables anchor not found')
+          text = text.replace(old, new, 1)
+          old = '''        <span class=\"statusBadge ${dfsIsManual ? 'isManual' : ''}\">${dfsIsManual ? '人工配置' : '自动生成'}</span>\n      </summary>\n      <div class=\"detailSectionBody\">\n        <section class=\"dfsEditor\">'''
+          new = '''        <span class=\"statusBadge ${dfsIsManual ? 'isManual' : ''}\">${dfsStatusLabel}</span>\n      </summary>\n      <div class=\"detailSectionBody\">\n        ${dfsIssue ? `<p class=\"muted\"><strong>自动 DFS 未完成：</strong>${escapeHtml(dfsIssue)}</p>` : ''}\n        <section class=\"dfsEditor\">'''
+          if old not in text:
+              raise SystemExit('render DFS summary anchor not found')
+          text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+
+          # Cache bust the module graph so browsers load the new render.js immediately.
+          path = Path('static/nav.js')
+          text = path.read_text(encoding='utf-8')
+          old = "from './nav/render.js?v=special-single-ui-19';"
+          new = "from './nav/render.js?v=dfs-invalid-transition-21';"
+          if old not in text:
+              raise SystemExit('nav render import anchor not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          path = Path('templates/nav.html')
+          text = path.read_text(encoding='utf-8')
+          old = '../static/nav.js?v=special-direct-refresh-20'
+          new = '../static/nav.js?v=dfs-invalid-transition-21'
+          if old not in text:
+              raise SystemExit('template nav version anchor not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+      - name: Commit production patch and remove temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add DFS.py web_nav_server.py static/nav/render.js static/nav.js templates/nav.html
+          git commit -m "Reject incomplete transitions from generated DFS"
+          git rm .github/workflows/patch-dfs-invalid-transition.yml
+          git commit -m "Remove temporary patch workflow"
+          git push origin HEAD:fix/dfs-invalid-transition
