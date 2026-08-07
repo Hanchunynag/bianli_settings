@@ -368,7 +368,11 @@ el('screen').addEventListener('click', async (event) => {
   }
   if (specialCapture) {
     specialCapture.stepCount = nextSpecialStep;
+    const recordedPageName = specialCapture.pageName || currentPageName();
     renderFollowingActivePage(data);
+    window.dispatchEvent(new CustomEvent('special-operate-recorded', {
+      detail: { pageName: recordedPageName },
+    }));
     return;
   }
   renderFollowingActivePage(data);
