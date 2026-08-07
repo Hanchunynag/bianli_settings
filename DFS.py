@@ -29,12 +29,12 @@ TARGET_FIELDS = (
     "expect",
 )
 
-
 DFS_RECORD_FIELDS = (
     "package_name",
     "main_page_name",
     "page_description",
     "path_snapshot",
+    "special",
 )
 
 DFS_TARGET_FIELDS = (
@@ -45,6 +45,7 @@ DFS_TARGET_FIELDS = (
 )
 
 DFS_MANUAL_FIELD = "dfs_manual"
+SPECIAL_EFFECT_PREFIX = "special_capture::"
 
 
 def safe_priority(value: Any, default: int = 1000) -> int:
@@ -120,6 +121,139 @@ def format_path_target(target: Any) -> Target:
     return formatted
 
 
+def format_special_step(operation: Any) -> Dict[str, Any]:
+    """Format one page-local special step without adding page navigation data."""
+    if not isinstance(operation, dict):
+        return {}
+    target = compact_target(operation.get("target"))
+    if not target:
+        return {}
+
+    key = str(target.get("key") or "").strip()
+    text = str(target.get("text") or "").strip()
+    raw_type = str(target.get("type") or target.get("component_type") or "").strip()
+    raw_value = target.get("value")
+
+    if key:
+        locator_type, locator_value = "key", key
+    elif text:
+        locator_type, locator_value = "text", text
+    else:
+        locator_type = raw_type or "component"
+        locator_value = raw_value
+        if locator_value in (None, "", []):
+            locator_value = (
+                target.get("key_description")
+                or target.get("step_prompt")
+                or locator_type
+            )
+
+    description = str(
+        target.get("key_description")
+        or target.get("step_prompt")
+        or text
+        or locator_value
+        or ""
+    ).strip()
+    prompt = str(
+        target.get("step_prompt")
+        or target.get("key_description")
+        or text
+        or locator_value
+        or ""
+    ).strip()
+
+    step: Dict[str, Any] = {
+        "operate": str(operation.get("operate") or "tap"),
+        "type": locator_type,
+        "value": locator_value,
+    }
+    if description:
+        step["key_description"] = description
+    if prompt:
+        step["step_prompt"] = prompt
+    return step
+
+
+def _special_session_metadata(effect: Any) -> Optional[tuple[str, int]]:
+    value = str(effect or "").strip()
+    if not value.startswith(SPECIAL_EFFECT_PREFIX):
+        return None
+    parts = value.split("::")
+    if len(parts) != 3 or not parts[1]:
+        return None
+    match = re.fullmatch(r"step(\d+)", parts[2])
+    if not match:
+        return None
+    return parts[1], int(match.group(1))
+
+
+def build_special_operations(state: Any) -> Dict[str, Any]:
+    """Build ordered page-local special operations.
+
+    ``special_capture::<session>::stepN`` operations are collapsed into one
+    ``operateN`` item containing ``step1``, ``step2`` ... . Popup records and
+    legacy single page operations remain one operate item each. The order of
+    first appearance in ``page_operations`` is preserved.
+    """
+    if not isinstance(state, dict):
+        return {}
+    operations = state.get("page_operations")
+    if not isinstance(operations, list):
+        return {}
+
+    groups: List[Dict[str, Any]] = []
+    session_groups: Dict[str, Dict[str, Any]] = {}
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, dict):
+            continue
+        step = format_special_step(operation)
+        if not step:
+            continue
+
+        session = _special_session_metadata(operation.get("effect"))
+        if session:
+            session_id, step_index = session
+            group = session_groups.get(session_id)
+            if group is None:
+                group = {
+                    "kind": "special_operate",
+                    "first_index": index,
+                    "steps": [],
+                }
+                session_groups[session_id] = group
+                groups.append(group)
+            group["steps"].append((step_index, step))
+            continue
+
+        popup_type = str(operation.get("popup_type") or "").strip()
+        effect = str(operation.get("effect") or "").strip()
+        kind = "popup" if popup_type or effect == "open_popup" else "special_operate"
+        group = {
+            "kind": kind,
+            "first_index": index,
+            "steps": [(1, step)],
+        }
+        if popup_type:
+            group["popup_type"] = popup_type
+        groups.append(group)
+
+    groups.sort(key=lambda item: int(item.get("first_index", 0)))
+    output: Dict[str, Any] = {}
+    for operate_index, group in enumerate(groups, start=1):
+        item: Dict[str, Any] = {"kind": group.get("kind") or "special_operate"}
+        if group.get("popup_type"):
+            item["popup_type"] = group["popup_type"]
+        sorted_steps = sorted(
+            group.get("steps") or [],
+            key=lambda pair: int(pair[0]),
+        )
+        for step_number, (_, step) in enumerate(sorted_steps, start=1):
+            item[f"step{step_number}"] = step
+        output[f"operate{operate_index}"] = item
+    return output
+
+
 def replace_navigation_target_locator(
     target: Any,
     manual_target: Any,
@@ -150,8 +284,6 @@ def is_human_description(value: Any) -> bool:
     label = str(value or "").strip()
     if not label or not any(char.isalnum() or "\u4e00" <= char <= "\u9fff" for char in label):
         return False
-    # 下划线、点号连接的纯英文通常是控件 key；连字符可能是合法页面名，
-    # 例如 a-b，因此不能把 "-" 当作技术标识符特征。
     if re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*(?:[._][A-Za-z0-9-]+)+", label):
         return False
     return True
@@ -261,14 +393,7 @@ def sync_descendant_manual_dfs_prefixes(
     old_description: str = "",
     new_description: str = "",
 ) -> List[str]:
-    """Replace one page's old DFS prefix in every manual descendant record.
-
-    Descendant matching follows the navigation graph.  Normally the complete
-    old locator prefix must match.  When the current page's final locator was
-    previously left stale (for example key -> text), the shared ancestor
-    prefix is enough to repair that current-page step in structural
-    descendants.
-    """
+    """Replace one page's old DFS prefix in every manual descendant record."""
     states = graph.get("states")
     if not isinstance(states, dict) or page_name not in states:
         return []
@@ -411,12 +536,14 @@ def root_dfs_record(graph: Graph, records: List[Dict[str, Any]]) -> Optional[Dic
         ),
         "page_description": description,
         "path_snapshot": [],
+        "special": build_special_operations(root_state),
     }
     return apply_manual_dfs(record, root_state)
 
 
 def format_dfs_record(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep only the four fields accepted by the compact DFS contract."""
+    """Keep the compact page fields plus ordered page-local special actions."""
+    special = record.get("special")
     return {
         "package_name": str(record.get("package_name") or ""),
         "main_page_name": str(record.get("main_page_name") or ""),
@@ -426,11 +553,12 @@ def format_dfs_record(record: Dict[str, Any]) -> Dict[str, Any]:
             for target in record.get("path_snapshot") or []
             if (formatted_target := format_path_target(target))
         ],
+        "special": special if isinstance(special, dict) else {},
     }
 
 
 def format_dfs_records(records: List[Dict[str, Any]], graph: Graph) -> List[Dict[str, Any]]:
-    """Return only the fixed compact fields allowed in DFS output JSON.
+    """Return compact DFS records with page-local special operations.
 
     The root page is emitted first with an empty ``path_snapshot`` because no
     tap is required to reach the application's initial page.
@@ -486,30 +614,13 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
         if page_name != root_page:
             state = graph.get("states", {}).get(page_name, {})
             fallback = str(state.get("last_title") or state.get("page_description") or page_name) if isinstance(state, dict) else page_name
-            operations = []
-            seen_operation_ids: Set[str] = set()
-            for operation in state.get("page_operations", []) if isinstance(state, dict) else []:
-                if not isinstance(operation, dict):
-                    continue
-                operation_id = str(operation.get("operation_id") or "").strip()
-                if not operation_id or operation_id in seen_operation_ids:
-                    continue
-                seen_operation_ids.add(operation_id)
-                item = {
-                    "operation_id": operation_id,
-                    "operate": str(operation.get("operate") or "tap"),
-                    "target": compact_target(operation.get("target")),
-                }
-                if operation.get("effect") not in (None, "", []):
-                    item["effect"] = operation["effect"]
-                operations.append(item)
             record = {
                 "page_name": page_name,
                 "package_name": str(graph.get("package_name") or ""),
                 "main_page_name": str(graph.get("main_page_name") or ""),
                 "page_description": "_".join(description_segments) or fallback,
                 "path_snapshot": path_snapshot,
-                "special_operate": operations,
+                "special": build_special_operations(state),
             }
             records.append(apply_manual_dfs(record, state))
 
