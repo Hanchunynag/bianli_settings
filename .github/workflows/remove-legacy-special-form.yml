@@ -1,0 +1,77 @@
+name: Remove legacy special form
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.head_ref == 'fix/remove-legacy-special-form-source'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/remove-legacy-special-form-source
+          fetch-depth: 0
+      - name: Remove legacy special maintenance source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          render = Path('static/nav/render.js')
+          text = render.read_text(encoding='utf-8')
+          text = text.replace('  const specialIsManual = Boolean(data.special_manual);\n', '', 1)
+
+          start = '          <div class="dfsEditorDivider"></div>\n          <form id="specialManualForm">'
+          end = '          <div id="dfsBranchDetail" class="dfsBranchDetail hidden"></div>'
+          start_i = text.find(start)
+          end_i = text.find(end, start_i)
+          if start_i < 0 or end_i < 0:
+              raise SystemExit('legacy special form HTML block not found')
+          text = text[:start_i] + end + text[end_i + len(end):]
+
+          start = "  const specialForm = box.querySelector('#specialManualForm');\n"
+          end = '  box.onclick = async (event) => {'
+          start_i = text.find(start)
+          end_i = text.find(end, start_i)
+          if start_i < 0 or end_i < 0:
+              raise SystemExit('legacy special submit handler not found')
+          text = text[:start_i] + end + text[end_i + len(end):]
+
+          start = "    } else if (action === 'reset-special-dfs') {"
+          end = "    } else if (action === 'delete-capture' || action === 'delete-capture-candidates') {"
+          start_i = text.find(start)
+          end_i = text.find(end, start_i)
+          if start_i < 0 or end_i < 0:
+              raise SystemExit('legacy special reset handler not found')
+          text = text[:start_i] + end + text[end_i + len(end):]
+
+          if 'specialManualForm' in text or 'reset-special-dfs' in text or '特殊操作 DFS</strong>' in text:
+              raise SystemExit('legacy special maintenance source still present')
+          render.write_text(text, encoding='utf-8')
+
+          nav = Path('static/nav.js')
+          nav_text = nav.read_text(encoding='utf-8')
+          old_import = "./nav/render.js?v=special-profile-15"
+          if old_import not in nav_text:
+              raise SystemExit('render.js cache import not found')
+          nav.write_text(nav_text.replace(old_import, './nav/render.js?v=special-single-ui-19', 1), encoding='utf-8')
+
+          html = Path('templates/nav.html')
+          html_text = html.read_text(encoding='utf-8')
+          html_text = html_text.replace('../static/nav.js?v=special-ui-refresh-18', '../static/nav.js?v=special-single-ui-19', 1)
+          html.write_text(html_text, encoding='utf-8')
+          PY
+
+          rm -f .github/workflows/remove-legacy-special-form.yml
+          git config user.name "special-ui-cleanup-bot"
+          git config user.email "special-ui-cleanup-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "Remove legacy duplicate special DFS form"
+          git push origin HEAD:fix/remove-legacy-special-form-source
