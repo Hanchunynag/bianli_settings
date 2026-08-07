@@ -1,0 +1,74 @@
+name: Fix special UI refresh
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'fix/special-ui-refresh-single-final'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/special-ui-refresh-single-final
+          fetch-depth: 0
+      - name: Apply special UI refresh fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          nav = Path('static/nav.js')
+          text = nav.read_text(encoding='utf-8')
+          old = '''  if (specialCapture) {\n    specialCapture.stepCount = nextSpecialStep;\n    store.data = data;\n    render(data);\n    refreshSpecialButtons();\n    renderSpecialHint();\n    return;\n  }'''
+          new = '''  if (specialCapture) {\n    specialCapture.stepCount = nextSpecialStep;\n    renderFollowingActivePage(data);\n    return;\n  }'''
+          if old not in text:
+              raise SystemExit('nav.js special refresh block not found')
+          nav.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          special = Path('static/nav/special-maintenance.js')
+          text = special.read_text(encoding='utf-8')
+          text = text.replace(
+              '<span>Special Operate 数组维护</span>\n      <small>${operations.length} 个 operation</small>',
+              '<span>特殊操作 DFS</span>\n      <small>${operations.length} 个 operation · 数组顺序执行</small>',
+              1,
+          )
+          old_mount = '''  const oldForm = box.querySelector('#specialManualForm');\n  if (!oldForm) return;\n  oldForm.hidden = true;\n  const oldDivider = oldForm.previousElementSibling;\n  if (oldDivider?.classList.contains('dfsEditorDivider')) oldDivider.hidden = true;'''
+          new_mount = '''  const dfsEditor = box.querySelector('.dfsEditor');\n  if (!dfsEditor) return;\n  const oldForm = box.querySelector('#specialManualForm');\n  const oldDivider = oldForm?.previousElementSibling;\n  if (oldDivider?.classList.contains('dfsEditorDivider')) oldDivider.remove();\n  oldForm?.remove();'''
+          if old_mount not in text:
+              raise SystemExit('special-maintenance old form block not found')
+          text = text.replace(old_mount, new_mount, 1)
+          old_insert = "  oldForm.insertAdjacentElement('afterend', section);"
+          new_insert = '''  const branchDetail = box.querySelector('#dfsBranchDetail');\n  if (branchDetail) branchDetail.insertAdjacentElement('beforebegin', section);\n  else dfsEditor.appendChild(section);'''
+          if old_insert not in text:
+              raise SystemExit('special-maintenance insertion anchor not found')
+          text = text.replace(old_insert, new_insert, 1)
+          special.write_text(text, encoding='utf-8')
+
+          html = Path('templates/nav.html')
+          text = html.read_text(encoding='utf-8')
+          text = text.replace('../static/nav.js?v=profile-special-clean', '../static/nav.js?v=special-ui-refresh-18')
+          text = text.replace('../static/nav/special-maintenance.js?v=profile-special-clean', '../static/nav/special-maintenance.js?v=special-ui-refresh-18')
+          html.write_text(text, encoding='utf-8')
+
+          # Final-tree assertions only; no test files are added.
+          nav_text = nav.read_text(encoding='utf-8')
+          special_text = special.read_text(encoding='utf-8')
+          assert 'renderFollowingActivePage(data);' in nav_text
+          assert 'oldForm?.remove();' in special_text
+          assert "oldForm.insertAdjacentElement('afterend', section);" not in special_text
+          assert '<span>Special Operate 数组维护</span>' not in special_text
+          PY
+
+          rm -f .github/workflows/fix-special-ui-refresh.yml
+          git config user.name "special-ui-fix-bot"
+          git config user.email "special-ui-fix-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "Refresh special DFS after recording and keep one maintenance UI"
+          git push origin HEAD:fix/special-ui-refresh-single-final
