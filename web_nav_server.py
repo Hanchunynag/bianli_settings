@@ -818,7 +818,11 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
         from_page,
         current.get("active_state") or current.get("state") or {"page_name": from_page},
     )
-    same_page = states_represent_same_page(after_capture["state"], from_state)
+    resolved_after_page = str(after_capture["state"].get("page_name") or "")
+    same_page = (
+        (not resolved_after_page or resolved_after_page == from_page)
+        and states_represent_same_page(after_capture["state"], from_state)
+    )
     if same_page:
         after_capture["state"] = resolve_detected_state(
             graph, after_capture["state"], from_page
