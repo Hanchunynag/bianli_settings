@@ -116,7 +116,13 @@ def format_special_step(operation: Any) -> Dict[str, Any]:
     text = str(target.get("text") or "").strip()
     raw_type = str(target.get("type") or target.get("component_type") or "").strip()
     raw_value = target.get("value")
-    if key:
+    popup_type = str(operation.get("popup_type") or "").strip()
+    if popup_type:
+        locator_type = popup_type
+        locator_value = key or text or raw_value
+        if locator_value in (None, "", []):
+            locator_value = target.get("key_description") or target.get("step_prompt") or popup_type
+    elif key:
         locator_type, locator_value = "key", key
     elif text:
         locator_type, locator_value = "text", text
