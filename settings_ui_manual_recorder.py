@@ -800,6 +800,109 @@ class SettingsProfileManager:
         self._save_profiles(profiles)
         return profile
 
+    def import_graph(
+        self,
+        *,
+        name: str,
+        settings_version: str,
+        device_model: str,
+        graph: Dict[str, Any],
+        source_filename: str = "",
+    ) -> Dict[str, Any]:
+        """Register an already-recorded navigation graph as an independent profile."""
+        name = str(name or "").strip()
+        settings_version = str(settings_version or "").strip()
+        device_model = str(device_model or "").strip()
+        source_filename = Path(str(source_filename or "")).name
+        if not settings_version:
+            raise ValueError("设置版本不能为空")
+        if not device_model:
+            raise ValueError("机型不能为空")
+        if not isinstance(graph, dict):
+            raise ValueError("导入 Graph 必须是 JSON 对象")
+
+        imported_graph = json.loads(json.dumps(graph, ensure_ascii=False))
+        states = imported_graph.get("states")
+        transitions = imported_graph.get("transitions")
+        if not isinstance(states, dict) or not states:
+            raise ValueError("导入 Graph 缺少有效 states，至少需要一个页面")
+        if not isinstance(transitions, list):
+            raise ValueError("导入 Graph 的 transitions 必须是数组")
+        traversal = imported_graph.get("traversal_config")
+        if not isinstance(traversal, dict):
+            traversal = {
+                "strategy": "dfs",
+                "root_page": "Pages_root",
+                "default_return_policy": {"type": "system_back"},
+            }
+            imported_graph["traversal_config"] = traversal
+        root_page = str(traversal.get("root_page") or "Pages_root").strip()
+        traversal["root_page"] = root_page
+        if root_page not in states:
+            raise ValueError(f"导入 Graph 的根页面不存在于 states：{root_page}")
+
+        invalid_transitions = []
+        for index, transition in enumerate(transitions, start=1):
+            if not isinstance(transition, dict):
+                invalid_transitions.append(f"#{index}: 不是对象")
+                continue
+            from_page = str(transition.get("from_page") or "").strip()
+            to_page = str(transition.get("to_page") or "").strip()
+            if not from_page or not to_page:
+                invalid_transitions.append(f"#{index}: 缺少 from_page/to_page")
+            elif from_page not in states or to_page not in states:
+                invalid_transitions.append(f"#{index}: {from_page} -> {to_page} 引用了不存在页面")
+        if invalid_transitions:
+            preview = "；".join(invalid_transitions[:5])
+            suffix = "；..." if len(invalid_transitions) > 5 else ""
+            raise ValueError(f"导入 Graph 含无效 transition：{preview}{suffix}")
+
+        profiles = self._load_profiles()
+        duplicate = next((
+            item for item in profiles
+            if str(item.get("settings_version") or "").casefold()
+            == settings_version.casefold()
+            and str(item.get("device_model") or "").casefold()
+            == device_model.casefold()
+        ), None)
+        if duplicate:
+            raise ValueError(
+                f"该设置版本和机型已经存在：{duplicate.get('name') or duplicate['profile_id']}"
+            )
+
+        profile_id = f"profile_{uuid.uuid4().hex[:12]}"
+        created_at = now_iso()
+        profile = {
+            "profile_id": profile_id,
+            "name": name or f"{settings_version} · {device_model}",
+            "settings_version": settings_version,
+            "device_model": device_model,
+            "parent_profile_id": "",
+            "source": "imported_graph",
+            "source_filename": source_filename,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "is_default": False,
+        }
+        imported_graph["settings_profile"] = {
+            key: profile[key]
+            for key in (
+                "profile_id",
+                "name",
+                "settings_version",
+                "device_model",
+                "parent_profile_id",
+                "source",
+                "source_filename",
+            )
+        }
+        target_work_dir = self.profile_work_dir(profile_id)
+        save_navigation_graph(imported_graph, target_work_dir)
+        save_current_path_session(target_work_dir, root_page)
+        profiles.append(profile)
+        self._save_profiles(profiles)
+        return profile
+
 
 def add_transition(graph: Dict[str, Any], transition: Dict[str, Any]) -> None:
     """兼容旧调用；新代码通过 NavigationGraph 实例维护。"""
@@ -1727,6 +1830,14 @@ class CreateSettingsProfileRequest(BaseModel):
     settings_version: str
     device_model: str
     parent_profile_id: str = DEFAULT_SETTINGS_PROFILE_ID
+
+
+class ImportSettingsProfileRequest(BaseModel):
+    name: str = ""
+    settings_version: str
+    device_model: str
+    source_filename: str = ""
+    graph: Dict[str, Any]
 
 
 # Web session and graph maintenance

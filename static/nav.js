@@ -160,6 +160,12 @@ function renderSettingsProfiles(data) {
 
   if (active?.is_default) {
     el('profileInheritance').textContent = '默认配置 · 继续读取原始 work_dir 配置文件';
+  } else if (active?.source === 'imported_graph') {
+    el('profileInheritance').textContent = [
+      active.settings_version,
+      active.device_model,
+      `导入 Graph：${active.source_filename || '本地 JSON'}`,
+    ].filter(Boolean).join(' · ');
   } else if (active) {
     const parent = profileById.get(active.parent_profile_id);
     el('profileInheritance').textContent = [
@@ -189,7 +195,9 @@ function renderSettingsProfiles(data) {
           <div class="profileCardSource">
             ${profile.is_default
               ? '直接使用启动参数指定的原始 work_dir'
-              : `创建时继承：${escapeHtml(parent?.name || profile.parent_profile_id || '默认配置')}`}
+              : profile.source === 'imported_graph'
+                ? `导入已有 Graph${profile.source_filename ? `：${escapeHtml(profile.source_filename)}` : ''}`
+                : `创建时继承：${escapeHtml(parent?.name || profile.parent_profile_id || '默认配置')}`}
           </div>
         </div>
         <button class="secondary compact" type="button"
@@ -314,6 +322,51 @@ el('settingsProfileForm').onsubmit = async (event) => {
     settings_version: form.elements.settings_version.value,
     device_model: form.elements.device_model.value,
     parent_profile_id: form.elements.parent_profile_id.value,
+  });
+  if (!result) return;
+  store.activeSettingsProfileId = result.profile.profile_id;
+  try {
+    window.sessionStorage.setItem(
+      'settingsProfileId',
+      result.profile.profile_id,
+    );
+  } catch (_error) {
+    // 浏览器禁用 sessionStorage 时仍使用当前标签页内存状态。
+  }
+  resetDirectoryForProfileSwitch();
+  form.reset();
+  await refreshSettingsProfiles();
+  el('settingsProfileDialog').close();
+  renderFollowingActivePage(await api('/api/state'));
+  el('overlayStatus').textContent = result.message;
+  el('overlayStatus').classList.remove('hidden');
+};
+
+el('settingsProfileImportForm').onsubmit = async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const file = form.elements.graph_file.files?.[0];
+  if (!file) {
+    window.alert('请选择 settings_navigation_graph.json。');
+    return;
+  }
+  let graph;
+  try {
+    graph = JSON.parse(await file.text());
+  } catch (error) {
+    window.alert(`Graph JSON 解析失败：${error.message}`);
+    return;
+  }
+  if (!graph || Array.isArray(graph) || typeof graph !== 'object') {
+    window.alert('Graph JSON 顶层必须是对象。');
+    return;
+  }
+  const result = await postJson('/api/settings_profiles/import', {
+    name: form.elements.name.value,
+    settings_version: form.elements.settings_version.value,
+    device_model: form.elements.device_model.value,
+    source_filename: file.name,
+    graph,
   });
   if (!result) return;
   store.activeSettingsProfileId = result.profile.profile_id;
