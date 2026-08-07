@@ -2,7 +2,7 @@ import { api, postJson } from './nav/api.js';
 import { el } from './nav/dom.js';
 import { store } from './nav/state.js';
 import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=follow-active-page-12';
-import { initSpecialMaintenance } from './nav/special-maintenance.js?v=special-structure-16';
+import { initSpecialMaintenance } from './nav/special-maintenance.js?v=popup-locator-fix-17';
 
 const popupTypeButtons = [...document.querySelectorAll('[data-popup-type]')];
 const popupTypes = new Set(popupTypeButtons.map((button) => button.dataset.popupType));
