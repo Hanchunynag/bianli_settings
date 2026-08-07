@@ -92,6 +92,181 @@ class ServerConfig:
 config = ServerConfig()
 
 
+_BASE_RESOLVE_DETECTED_STATE = resolve_detected_state
+PERSISTENT_STATE_FIELDS = (
+    DFS_MANUAL_FIELD,
+    "dfs_original_page_description",
+    "page_operations",
+    "page_variants",
+    "merged_candidates",
+    "continued_captures",
+    "manual_recognition_profiles",
+)
+
+
+def recognition_texts(state: Dict[str, Any]) -> List[str]:
+    """Return the stable text subset used by manually bound page recognition."""
+    signature = state.get("signature") or {}
+    values = signature.get("texts_any") if isinstance(signature, dict) else []
+    texts: List[str] = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in texts:
+            texts.append(text)
+    return texts[:8]
+
+
+def build_manual_recognition_profile(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a reusable page fingerprint for title-less or otherwise ambiguous pages."""
+    raw_page_name = str(state.get("raw_page_name") or state.get("page_name") or "").strip()
+    nav_key = str(state.get("nav_key") or "").strip()
+    title = str(state.get("last_title") or "").strip()
+    texts = recognition_texts(state)
+    if not nav_key and not title and not texts:
+        raise ValueError(
+            "当前页面没有可复用的 nav_key、标题或稳定文本，暂时无法建立自动识别指纹。"
+        )
+    identity = json.dumps(
+        [raw_page_name, nav_key, title, sorted(texts)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return {
+        "profile_id": f"page_recognition_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:12]}",
+        "created_at": now_iso(),
+        "raw_page_name": raw_page_name,
+        "nav_key": nav_key,
+        "title": title,
+        "texts_any": texts,
+    }
+
+
+def manual_recognition_score(detected: Dict[str, Any], profile: Dict[str, Any]) -> int:
+    """Score one manually maintained fingerprint against a newly detected state."""
+    detected_raw = str(detected.get("raw_page_name") or detected.get("page_name") or "").strip()
+    profile_raw = str(profile.get("raw_page_name") or "").strip()
+    if profile_raw and detected_raw and profile_raw != detected_raw:
+        return -1
+
+    detected_nav = str(detected.get("nav_key") or "").strip()
+    profile_nav = str(profile.get("nav_key") or "").strip()
+    if profile_nav:
+        return 10000 if detected_nav and detected_nav == profile_nav else -1
+
+    detected_title = str(detected.get("last_title") or "").strip()
+    profile_title = str(profile.get("title") or "").strip()
+    if profile_title and detected_title and profile_title != detected_title:
+        return -1
+
+    profile_texts = {
+        str(value or "").strip()
+        for value in profile.get("texts_any", []) or []
+        if str(value or "").strip()
+    }
+    detected_texts = set(recognition_texts(detected))
+    if not profile_texts or not detected_texts:
+        return 100 if profile_title and detected_title == profile_title else -1
+
+    shared = len(profile_texts & detected_texts)
+    threshold = 1 if len(profile_texts) == 1 else max(
+        2,
+        (min(len(profile_texts), len(detected_texts)) + 1) // 2,
+    )
+    if shared < threshold:
+        return -1
+    return shared * 10 + (5 if profile_title and detected_title == profile_title else 0)
+
+
+def preserve_stored_state_fields(
+    graph: Dict[str, Any],
+    detected: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Never let a fresh capture erase manually maintained or accumulated page data."""
+    page_name = str(detected.get("page_name") or "").strip()
+    stored = graph.get("states", {}).get(page_name, {})
+    if not isinstance(stored, dict):
+        return detected
+    state = dict(detected)
+    for key in PERSISTENT_STATE_FIELDS:
+        if key in stored:
+            state[key] = stored[key]
+    if isinstance(stored.get(DFS_MANUAL_FIELD), dict):
+        # page_description is part of the manually maintained DFS record. A fresh
+        # title/context inference must not overwrite what the user explicitly saved.
+        if stored.get("page_description") not in (None, ""):
+            state["page_description"] = stored["page_description"]
+    return state
+
+
+def resolve_detected_state(
+    graph: Dict[str, Any],
+    detected: Dict[str, Any],
+    preferred_page: str = "",
+) -> Dict[str, Any]:
+    """Resolve page identity with manual bindings first, then fall back to legacy rules."""
+    matches: List[tuple[int, str, Dict[str, Any]]] = []
+    for page_name, stored in graph.get("states", {}).items():
+        if not isinstance(stored, dict):
+            continue
+        for profile in stored.get("manual_recognition_profiles", []) or []:
+            if not isinstance(profile, dict):
+                continue
+            score = manual_recognition_score(detected, profile)
+            if score >= 0:
+                matches.append((score, str(page_name), stored))
+
+    resolved: Optional[Dict[str, Any]] = None
+    if matches:
+        best_score = max(item[0] for item in matches)
+        best = [item for item in matches if item[0] == best_score]
+        preferred = next((item for item in best if item[1] == preferred_page), None)
+        selected = preferred or (best[0] if len(best) == 1 else None)
+        if selected:
+            _, page_name, stored = selected
+            resolved = dict(detected)
+            resolved["page_name"] = page_name
+            resolved.setdefault(
+                "raw_page_name",
+                str(detected.get("raw_page_name") or detected.get("page_name") or ""),
+            )
+            for key in ("parent_page", "parent_title", "context_key", "entry_identity"):
+                if key in stored:
+                    resolved[key] = stored[key]
+            if stored.get("page_description"):
+                resolved["page_description"] = stored["page_description"]
+
+    if resolved is None:
+        resolved = _BASE_RESOLVE_DETECTED_STATE(graph, detected, preferred_page)
+    return preserve_stored_state_fields(graph, resolved)
+
+
+def protect_manual_dfs_transition(
+    graph: Dict[str, Any],
+    to_page: str,
+    transition: Dict[str, Any],
+) -> None:
+    """Keep a re-recorded incoming edge aligned with the destination's manual DFS locator."""
+    state = graph.get("states", {}).get(to_page, {})
+    manual = state.get(DFS_MANUAL_FIELD) if isinstance(state, dict) else None
+    path_snapshot = manual.get("path_snapshot") if isinstance(manual, dict) else None
+    if not isinstance(path_snapshot, list) or not path_snapshot:
+        return
+    manual_target = path_snapshot[-1]
+    if not isinstance(manual_target, dict):
+        return
+
+    steps = transition.get("steps")
+    if isinstance(steps, list) and steps:
+        last_step = steps[-1]
+        if isinstance(last_step, dict) and isinstance(last_step.get("target"), dict):
+            replace_navigation_target_locator(last_step["target"], manual_target)
+    if (
+        isinstance(transition.get("target"), dict)
+        and (not isinstance(steps, list) or len(steps) <= 1)
+    ):
+        replace_navigation_target_locator(transition["target"], manual_target)
+
+
 def ok_response(**kwargs: Any) -> JSONResponse:
     return JSONResponse({"ok": True, **kwargs})
 
@@ -491,7 +666,12 @@ def record_page_operation(
         execute_device_input(config.device_id, "tap", [int(x), int(y)])
     time.sleep(1.0 if mode == "gesture" else 1.2)
     after = capture_state_without_graph_write()
-    if mode != "popup" and not states_represent_same_page(after["state"], before["state"]):
+    before_page_name = str(before["state"].get("page_name") or "")
+    after_page_name = str(after["state"].get("page_name") or "")
+    if mode != "popup" and (
+        (before_page_name and after_page_name and before_page_name != after_page_name)
+        or not states_represent_same_page(after["state"], before["state"])
+    ):
         message = (
             "执行后进入了新页面，请使用页面跳转录制，不要保存为页面内操作。"
             if mode == "gesture"
@@ -684,6 +864,7 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
     }
     if effect:
         transition["effect"] = effect
+    protect_manual_dfs_transition(graph, to_page, transition)
     graph.setdefault("states", {})[after["state"]["page_name"]] = after["state"]
     NavigationGraph(graph).add_transition(transition)
     if steps:
@@ -705,6 +886,38 @@ def api_console_action(req: ActionRequest) -> JSONResponse:
     payload = req.payload or {}
     if action == "capture_current":
         return ok_response(**read_current_state(capture=True))
+    if action == "bind_current_page":
+        page_name = str(payload.get("page_name") or "").strip()
+        graph = config.graphs.load()
+        states = graph.setdefault("states", {})
+        target_state = states.get(page_name)
+        if not isinstance(target_state, dict):
+            raise ValueError(f"页面不存在：{page_name}")
+
+        snapshot = capture_state_without_graph_write()
+        profile = build_manual_recognition_profile(snapshot["state"])
+        profile_id = str(profile["profile_id"])
+        # One physical fingerprint can belong to only one maintained page. Rebinding
+        # it removes the same fingerprint from any previously selected page.
+        for stored in states.values():
+            if not isinstance(stored, dict):
+                continue
+            profiles = stored.get("manual_recognition_profiles")
+            if isinstance(profiles, list):
+                profiles[:] = [
+                    item for item in profiles
+                    if not isinstance(item, dict) or item.get("profile_id") != profile_id
+                ]
+        target_state.setdefault("manual_recognition_profiles", []).append(profile)
+        config.graphs.save(graph)
+        save_current_path_session(config.work_dir, page_name)
+        current = read_current_state(
+            snapshot=snapshot,
+            graph=graph,
+            active_page=page_name,
+            message=f"已将当前设备界面绑定为 {page_display_description(graph, page_name)}；后续进入会优先按该识别指纹回认。",
+        )
+        return ok_response(**current, recognition_profile=profile)
     if action == "system_back":
         graph = config.graphs.load()
         active_page = current_session_page(config.work_dir)
