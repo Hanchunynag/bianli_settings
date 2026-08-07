@@ -106,41 +106,53 @@ def format_path_target(target: Any) -> Target:
 
 
 def format_special_step(operation: Any) -> Dict[str, Any]:
-    """Format one page-local special step into the compact special contract."""
+    """Format one page-local special step using only executable locators.
+
+    ``type`` is always the locator type (``key`` or ``text``). Popup metadata
+    such as Dialog/SheetWrapper/MenuWrapper is an operation hint and must never
+    replace the locator type in the exported DFS structure.
+    """
     if not isinstance(operation, dict):
         return {}
     target = compact_target(operation.get("target"))
     if not target:
         return {}
+
     key = str(target.get("key") or "").strip()
     text = str(target.get("text") or "").strip()
-    raw_type = str(target.get("type") or target.get("component_type") or "").strip()
+    raw_type = str(target.get("type") or "").strip()
     raw_value = target.get("value")
-    popup_type = str(operation.get("popup_type") or "").strip()
-    if popup_type:
-        locator_type = popup_type
-        locator_value = key or text or raw_value
-        if locator_value in (None, "", []):
-            locator_value = target.get("key_description") or target.get("step_prompt") or popup_type
-    elif key:
+
+    if key:
         locator_type, locator_value = "key", key
     elif text:
         locator_type, locator_value = "text", text
+    elif raw_type in {"key", "text"} and raw_value not in (None, "", []):
+        locator_type, locator_value = raw_type, raw_value
     else:
-        locator_type = raw_type or "component"
-        locator_value = raw_value
-        if locator_value in (None, "", []):
-            locator_value = target.get("key_description") or target.get("step_prompt") or locator_type
+        # Legacy popup records may have target.type=Dialog while their actual
+        # locator was stored in target.value. Keep the executable value but
+        # never export Dialog as the locator type. Prefer text as the safest
+        # legacy fallback when no explicit key/text survived.
+        if raw_value in (None, "", []):
+            return {}
+        locator_type, locator_value = "text", raw_value
+
     description = str(
-        target.get("key_description") or target.get("step_prompt") or text or locator_value or ""
+        target.get("key_description")
+        or target.get("step_prompt")
+        or text
+        or locator_value
+        or ""
     ).strip()
     prompt = str(
-        target.get("step_prompt") or target.get("key_description") or text or locator_value or ""
+        target.get("step_prompt")
+        or target.get("key_description")
+        or text
+        or locator_value
+        or ""
     ).strip()
-    step: Dict[str, Any] = {
-        "type": locator_type,
-        "value": locator_value,
-    }
+    step: Dict[str, Any] = {"type": locator_type, "value": locator_value}
     if description:
         step["key_description"] = description
     if prompt:
@@ -166,7 +178,8 @@ def build_special_operations(state: Any) -> Dict[str, Any]:
 
     A special capture session becomes one operation array. A popup becomes one
     operation array containing its opening step. Ordinary page operations are
-    intentionally excluded from this structure.
+    intentionally excluded from this structure. Popup kind remains internal
+    metadata; exported steps still use key/text locators.
     """
     if not isinstance(state, dict):
         return {}
@@ -548,9 +561,6 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
 
     visit(root_page, [], [])
 
-    # A manually created page may intentionally have no graph edge. Once its
-    # DFS path is explicitly maintained, that path is authoritative and the
-    # page must still be exported.
     for page_name, state in states.items():
         if page_name in visited or not isinstance(state, dict):
             continue
