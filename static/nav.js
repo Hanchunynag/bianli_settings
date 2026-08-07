@@ -2,7 +2,7 @@ import { api, postJson } from './nav/api.js';
 import { el } from './nav/dom.js';
 import { store } from './nav/state.js';
 import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=follow-active-page-12';
-import { initSpecialMaintenance } from './nav/special-maintenance.js';
+import { initSpecialMaintenance } from './nav/special-maintenance.js?v=special-structure-16';
 
 const popupTypeButtons = [...document.querySelectorAll('[data-popup-type]')];
 const popupTypes = new Set(popupTypeButtons.map((button) => button.dataset.popupType));
@@ -43,8 +43,8 @@ function renderSpecialOperateHint(message = '') {
   const status = el('overlayStatus');
   if (!specialCapture) return;
   status.textContent = message || (
-    `正在录制 special_operate：${specialCapture.pageName}，已保存 ${specialCapture.stepCount} 步。`
-    + '继续点击截图录制下一步；完成后点“完成特殊操作”，放弃本组请点“取消特殊操作”。'
+    `正在录制 special_opearte：${specialCapture.pageName}，当前 operation 已保存 ${specialCapture.stepCount} 个数组项。`
+    + '继续点击截图会向同一个 operation 数组追加对象；完成后点“完成特殊操作”，放弃本组请点“取消特殊操作”。'
   );
   status.classList.remove('hidden');
 }
@@ -80,7 +80,7 @@ function startSpecialOperate() {
 function finishSpecialOperate() {
   if (!specialCapture) return;
   if (!specialCapture.stepCount) {
-    window.alert('当前 special_operate 还没有录制任何步骤。');
+    window.alert('当前 special_opearte 还没有录制任何操作项。');
     return;
   }
   const count = specialCapture.stepCount;
@@ -88,7 +88,7 @@ function finishSpecialOperate() {
   refreshSpecialButtons();
   render(store.data);
   const status = el('overlayStatus');
-  status.textContent = `已完成一组 special_operate，共 ${count} 步；DFS 导出时会作为同一个 operateN 输出。`;
+  status.textContent = `已完成一组 special_opearte，共 ${count} 个数组项；DFS 导出时会作为一个 operationN: [...] 保存。`;
   status.classList.remove('hidden');
 }
 
@@ -119,13 +119,13 @@ async function rollbackSpecialOperate() {
   const data = await api('/api/state');
   renderFollowingActivePage(data);
   const status = el('overlayStatus');
-  status.textContent = `已取消本组 special_operate，并回滚 ${capture.operationIds.length} 个已录步骤。`;
+  status.textContent = `已取消本组 special_opearte，并回滚 ${capture.operationIds.length} 个已录数组项。`;
   status.classList.remove('hidden');
 }
 
 function selectPopupType(popupType = null, rerender = true) {
   if (popupType && specialCapture) {
-    window.alert('当前正在录制多步 special_operate，请先完成或取消本组采集，再录制弹窗。');
+    window.alert('当前正在录制多步 special_opearte，请先完成或取消本组采集，再录制弹窗。');
     return;
   }
   store.popupType = popupType && popupTypes.has(popupType) ? popupType : null;
@@ -237,7 +237,7 @@ el('screen').addEventListener('click', async (event) => {
     if (popupType) selectPopupType(null, false);
   }
   if (!data) {
-    if (specialCapture) renderSpecialOperateHint('本步没有保存；仍处于 special_operate 采集状态，可继续操作或取消。');
+    if (specialCapture) renderSpecialOperateHint('本步没有保存；仍处于 special_opearte 采集状态，可继续操作或取消。');
     return;
   }
   if (specialCapture) {
