@@ -187,7 +187,7 @@ def normalize_special(value: Any) -> Dict[str, List[Dict[str, Any]]]:
             # 保存或导出时统一恢复成 operationN -> []。
             indexed = []
             for key, raw_item in raw_group.items():
-                match = re.fullmatch(r"step(\\d+)", str(key))
+                match = re.fullmatch(r"step(\d+)", str(key))
                 if match:
                     indexed.append((int(match.group(1)), raw_item))
             for step_index, raw_item in sorted(indexed):
@@ -242,7 +242,7 @@ def _special_session_metadata(effect: Any) -> Optional[tuple[str, int]]:
     if len(parts) < 2 or not parts[1]:
         return None
     if len(parts) >= 3:
-        match = re.fullmatch(r"step(\\d+)", parts[2])
+        match = re.fullmatch(r"step(\d+)", parts[2])
         if match:
             return parts[1], int(match.group(1))
     return parts[1], 10**9
