@@ -157,9 +157,12 @@ async def bind_settings_profile(
 
 
 _BASE_RESOLVE_DETECTED_STATE = resolve_detected_state
+SPECIAL_MANUAL_HISTORY_MIGRATED_FIELD = "special_manual_history_migrated"
+
 PERSISTENT_STATE_FIELDS = (
     DFS_MANUAL_FIELD,
     SPECIAL_MANUAL_FIELD,
+    SPECIAL_MANUAL_HISTORY_MIGRATED_FIELD,
     "dfs_original_page_description",
     "page_operations",
     "special_operations",
@@ -328,6 +331,38 @@ def create_manual_page(payload: Dict[str, Any]) -> Dict[str, Any]:
             "message": f"已新增并绑定人工页面 {page_description}（{page_name}）。请继续人工维护该页面 DFS。"}
 
 
+def migrate_legacy_special_manual_history(state: Dict[str, Any]) -> bool:
+    """Backfill legacy recorded special steps into manual DFS exactly once."""
+    manual = state.get(SPECIAL_MANUAL_FIELD)
+    if not isinstance(manual, dict):
+        return False
+    if state.get(SPECIAL_MANUAL_HISTORY_MIGRATED_FIELD):
+        return False
+
+    normalized_manual = normalize_special(manual)
+    recorded_state = dict(state)
+    recorded_state.pop(SPECIAL_MANUAL_FIELD, None)
+    recorded_state.pop(SPECIAL_MANUAL_HISTORY_MIGRATED_FIELD, None)
+    recorded = build_special_operations(recorded_state)
+
+    changed = False
+    for operation_index, recorded_items in enumerate(recorded.values(), start=1):
+        operation_name = f"operation{operation_index}"
+        manual_items = normalized_manual.get(operation_name)
+        if manual_items is None:
+            normalized_manual[operation_name] = list(recorded_items)
+            changed = True
+            continue
+        if len(recorded_items) > len(manual_items):
+            manual_items.extend(recorded_items[len(manual_items):])
+            changed = True
+
+    if changed:
+        state[SPECIAL_MANUAL_FIELD] = normalize_special(normalized_manual)
+    state[SPECIAL_MANUAL_HISTORY_MIGRATED_FIELD] = True
+    return True
+
+
 def maintain_special_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
     page_name = str(payload.get("page_name") or "").strip()
     graph = config.graphs.load()
@@ -341,6 +376,7 @@ def maintain_special_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         special = normalize_special(payload.get("special") or {})
         state[SPECIAL_MANUAL_FIELD] = special
+        state[SPECIAL_MANUAL_HISTORY_MIGRATED_FIELD] = True
         message = "已保存 special DFS 人工维护数据。"
     config.graphs.save(graph)
     compact = export_compact_dfs({})
@@ -1352,6 +1388,8 @@ def api_page_detail(page_name: str) -> JSONResponse:
     state = graph.get("states", {}).get(page_name)
     if not isinstance(state, dict):
         raise ValueError(f"页面不存在：{page_name}")
+    if migrate_legacy_special_manual_history(state):
+        config.graphs.save(graph)
     transitions = graph.get("transitions", [])
     dfs_record = dfs_record_for_page(graph, page_name) or {
         "package_name": str(graph.get("package_name") or ""),
