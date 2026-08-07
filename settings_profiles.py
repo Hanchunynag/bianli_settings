@@ -164,12 +164,3 @@ class CreateSettingsProfileRequest(BaseModel):
     settings_version: str
     device_model: str
     parent_profile_id: str = DEFAULT_SETTINGS_PROFILE_ID
-
-
-# web_nav_server imports this module before importing DFS symbols. Installing
-# here lets the profile integration remain untouched while restoring the
-# established special_opearte.operationN=[...] DFS contract.
-from special_opearte_contract import install_dfs_contract as _install_dfs_contract
-
-_install_dfs_contract()
-del _install_dfs_contract
