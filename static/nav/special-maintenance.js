@@ -339,6 +339,23 @@ function scheduleMount(force = false) {
   });
 }
 
+window.addEventListener('special-operate-recorded', async (event) => {
+  const pageName = String(
+    event.detail?.pageName
+    || currentDetailPage()
+    || '',
+  ).trim();
+  if (!pageName) return;
+  if (!await loadStructure(pageName)) return;
+
+  const section = document.querySelector('[data-special-array-maintenance]');
+  if (section) {
+    renderEditor(section);
+    return;
+  }
+  await mountEditor(true);
+});
+
 const pageDetail = document.getElementById('pageDetail');
 if (pageDetail) {
   new MutationObserver(() => scheduleMount(false)).observe(pageDetail, {
