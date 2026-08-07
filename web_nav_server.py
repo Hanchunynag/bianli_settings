@@ -790,6 +790,15 @@ def export_compact_dfs(
     return result
 
 
+def capture_interaction_tree_without_page_resolution() -> Dict[str, Any]:
+    """Capture screenshot/UI tree for interaction only; never derive or resolve page identity."""
+    if not capture_device(config.device_id, config.output_dir, include_screen=True):
+        raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
+    root_json = load_json(config.output_dir / "current_ui_tree.json")
+    annotate(root_json)
+    return {"root": root_json}
+
+
 def record_page_operation(
     x: int,
     y: int,
@@ -807,7 +816,6 @@ def record_page_operation(
 
     selected_popup_type = normalize_popup_type(popup_type) if mode == "popup" else ""
     locked_special_page = str(owner_page or "").strip() if mode == "special" else ""
-    before = capture_state_without_graph_write()
     graph = config.graphs.load()
     if mode == "special":
         if not locked_special_page:
@@ -817,7 +825,10 @@ def record_page_operation(
             raise ValueError(f"special_operate 归属页面不存在：{locked_special_page}")
         active = dict(stored_state)
         active_page = locked_special_page
+        raw_before = capture_interaction_tree_without_page_resolution()
+        before = {"root": raw_before["root"], "state": dict(active)}
     else:
+        before = capture_state_without_graph_write()
         stored_state = graph.get("states", {}).get(before["state"].get("page_name", ""))
         active = {**stored_state, **before["state"]} if isinstance(stored_state, dict) else before["state"]
         active_page = str(active.get("page_name") or before["state"].get("page_name") or "")
@@ -888,7 +899,11 @@ def record_page_operation(
     else:
         execute_device_input(config.device_id, "tap", [int(x), int(y)])
     time.sleep(1.0 if mode == "gesture" else 1.2)
-    after = capture_state_without_graph_write()
+    if mode == "special":
+        raw_after = capture_interaction_tree_without_page_resolution()
+        after = {"root": raw_after["root"], "state": dict(active)}
+    else:
+        after = capture_state_without_graph_write()
     if mode not in {"popup", "special"} and not states_represent_same_page(after["state"], before["state"]):
         message = (
             "执行后进入了新页面，请使用页面跳转录制，不要保存为页面内操作。"
