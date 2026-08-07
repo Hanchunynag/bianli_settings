@@ -1,6 +1,9 @@
 name: Import key profile files
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - agent/request-profiles-key-files
@@ -10,10 +13,12 @@ permissions:
 
 jobs:
   import-key-files:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: agent/request-profiles-key-files
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
