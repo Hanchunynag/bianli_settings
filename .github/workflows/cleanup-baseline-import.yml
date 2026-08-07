@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .cleanup-import/chunk_000 .cleanup-import/chunk_001 .cleanup-import/chunk_002 > /tmp/clean_payload.b64
+          cat .cleanup-import/fix_000 .cleanup-import/fix_001 .cleanup-import/fix_002 .cleanup-import/fix_003 .cleanup-import/fix_004 .cleanup-import/fix_005 .cleanup-import/fix_006 > /tmp/clean_payload.b64
           base64 --decode /tmp/clean_payload.b64 > /tmp/clean_payload.zip
           rm -rf /tmp/clean_payload
           mkdir -p /tmp/clean_payload
