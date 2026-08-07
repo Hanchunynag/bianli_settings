@@ -1,5 +1,5 @@
-import { el } from './dom.js';
-import { store } from './state.js';
+import { el } from './dom.js?v=profile-request-scope-14';
+import { store } from './state.js?v=profile-request-scope-14';
 
 function readableError(data, response) {
   if (typeof data?.error === 'string') return data.error;
@@ -10,16 +10,34 @@ function readableError(data, response) {
   return `请求失败（HTTP ${response.status}）`;
 }
 
+function withSettingsProfile(path) {
+  const url = new URL(path, window.location.origin);
+  if (
+    url.pathname.startsWith('/api/')
+    && !url.searchParams.has('profile_id')
+  ) {
+    url.searchParams.set(
+      'profile_id',
+      store.activeSettingsProfileId || 'default',
+    );
+  }
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
 async function requestJson(path, options = {}, blocking = true) {
   if (blocking && store.busy) return null;
+  const previouslyDisabledControls = new Set();
   if (blocking) {
     store.busy = true;
     el('loading').classList.remove('hidden');
-    document.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+    document.querySelectorAll('button, select').forEach((control) => {
+      if (control.disabled) previouslyDisabledControls.add(control);
+      control.disabled = true;
+    });
   }
   const errorBox = el('error');
   try {
-    const response = await fetch(path, options);
+    const response = await fetch(withSettingsProfile(path), options);
     const data = await response.json();
     if (!response.ok || data?.ok === false) {
       throw new Error(readableError(data, response));
@@ -35,7 +53,9 @@ async function requestJson(path, options = {}, blocking = true) {
     if (blocking) {
       store.busy = false;
       el('loading').classList.add('hidden');
-      document.querySelectorAll('button').forEach((button) => { button.disabled = false; });
+      document.querySelectorAll('button, select').forEach((control) => {
+        control.disabled = previouslyDisabledControls.has(control);
+      });
     }
   }
 }
