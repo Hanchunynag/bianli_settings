@@ -174,46 +174,24 @@ el('bindCurrentPageBtn').onclick = async () => {
 };
 
 el('addAndBindCurrentPageBtn').onclick = async () => {
-  const captured = await postJson('/api/console_action', {
-    action: 'capture_current',
-    payload: {},
-  });
-  if (!captured) return;
-  const detectedName = String(
-    captured.active_page
-    || captured.state?.page_name
-    || '',
-  ).trim();
-  if (!detectedName || detectedName === 'Pages_root') {
-    window.alert('当前页面不能作为新的人工页面创建。');
-    return;
-  }
-  if (
-    detectedName !== 'Pages_page'
-    && !window.confirm(`当前页面已经识别为 ${detectedName}。继续会把这个页面改名后作为人工页面绑定，是否继续？`)
-  ) return;
+  let pageName = window.prompt('请输入新的内部页面 ID，例如 Pages_高级设置：', 'Pages_');
+  if (!pageName) return;
+  pageName = pageName.trim();
+  if (!pageName.startsWith('Pages_')) pageName = `Pages_${pageName}`;
+  const pageDescription = window.prompt('请输入页面显示名称（无标题页必须人工填写）：', pageName.replace(/^Pages_/, ''));
+  if (!pageDescription?.trim()) return;
 
-  let newName = window.prompt('请输入新的内部页面 ID，例如 Pages_高级设置：', detectedName === 'Pages_page' ? 'Pages_' : detectedName);
-  if (!newName) return;
-  newName = newName.trim();
-  if (!newName.startsWith('Pages_')) newName = `Pages_${newName}`;
-  const newTitle = window.prompt('请输入页面显示名称（无标题页建议人工填写）：', newName.replace(/^Pages_/, '')) || '';
-
-  if (newName !== detectedName || newTitle) {
-    const renamed = await postJson('/api/rename_page', {
-      old_page_name: detectedName,
-      new_page_name: newName,
-      new_title: newTitle,
-    });
-    if (!renamed) return;
-  }
-  const bound = await postJson('/api/console_action', {
-    action: 'bind_current_page',
-    payload: { page_name: newName },
+  const created = await postJson('/api/console_action', {
+    action: 'create_manual_page',
+    payload: {
+      page_name: pageName,
+      page_description: pageDescription.trim(),
+    },
   });
-  renderFollowingActivePage(bound);
+  if (!created) return;
+  renderFollowingActivePage(created);
   const status = el('overlayStatus');
-  status.textContent = `已新增并绑定人工页面 ${newName}。请在右侧页面详情中继续人工维护该页面 DFS。`;
+  status.textContent = `已新增并绑定人工页面 ${pageName}。下一步请在页面详情中人工维护该页面 DFS path_snapshot。`;
   status.classList.remove('hidden');
 };
 
@@ -237,7 +215,7 @@ el('screen').addEventListener('click', async (event) => {
   const popupType = store.popupType;
   const special = specialCapture;
   const nextSpecialStep = special ? special.stepCount + 1 : 0;
-  const action = popupType ? 'popup_tap' : special ? 'same_page_gesture' : 'tap_point';
+  const action = popupType ? 'popup_tap' : special ? 'special_tap' : 'tap_point';
   const payload = popupType
     ? { ...point, popup_type: popupType }
     : special
