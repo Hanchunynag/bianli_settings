@@ -6,9 +6,9 @@ import argparse
 import hashlib
 import hmac
 import json
-import re
 import shutil
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -59,9 +59,17 @@ from settings_ui_manual_recorder import (
     step_target,
     transition_id_for_pages,
 )
+from settings_profiles import (
+    DEFAULT_SETTINGS_PROFILE_ID,
+    CreateSettingsProfileRequest,
+    SettingsProfileManager,
+)
+
 from DFS import (
     DFS_MANUAL_FIELD,
+    SPECIAL_MANUAL_FIELD,
     build_special_operations,
+    normalize_special,
     dfs_branch_for_page,
     dfs_record_display_name,
     dfs_record_for_page,
@@ -76,8 +84,10 @@ APP_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Settings Navigation Recorder")
 POPUP_TYPES = ("SheetWrapper", "Dialog", "MenuWrapper")
 POPUP_TYPE_SET = frozenset(POPUP_TYPES)
-SPECIAL_EFFECT_PREFIX = "special_capture::"
-SPECIAL_STEP_FIELDS = ("type", "value", "key_description", "step_prompt")
+REQUEST_SETTINGS_PROFILE_ID: ContextVar[str] = ContextVar(
+    "request_settings_profile_id",
+    default=DEFAULT_SETTINGS_PROFILE_ID,
+)
 
 
 class ServerConfig:
@@ -87,30 +97,79 @@ class ServerConfig:
         device_id: str = DEFAULT_DEVICE_ID,
         output_dir: Optional[Path] = None,
     ) -> None:
-        self.work_dir = Path(work_dir)
+        self.base_work_dir = Path(work_dir)
         self.device_id = device_id
-        self.output_dir = Path(output_dir) if output_dir else self.work_dir / "outputs" / "latest"
-        self.graphs = NavigationGraphRepository(self.work_dir)
+        self._default_output_dir = Path(output_dir) if output_dir else None
+        self.settings_profiles = SettingsProfileManager(self.base_work_dir)
+
+    @property
+    def profile_id(self) -> str:
+        profile_id = str(
+            REQUEST_SETTINGS_PROFILE_ID.get()
+            or DEFAULT_SETTINGS_PROFILE_ID
+        )
+        self.settings_profiles.get_profile(profile_id)
+        return profile_id
+
+    @property
+    def work_dir(self) -> Path:
+        return self.settings_profiles.profile_work_dir(
+            self.profile_id
+        )
+
+    @property
+    def output_dir(self) -> Path:
+        # Runtime capture artifacts are profile-scoped as well.  Only the
+        # default profile honors an explicit legacy --output-dir override.
+        if (
+            self.profile_id == DEFAULT_SETTINGS_PROFILE_ID
+            and self._default_output_dir is not None
+        ):
+            return self._default_output_dir
+        return self.work_dir / "outputs" / "latest"
+
+    @property
+    def graphs(self) -> NavigationGraphRepository:
+        return NavigationGraphRepository(self.work_dir)
 
 
 config = ServerConfig()
 
 
+@app.middleware("http")
+async def bind_settings_profile(
+    request: Request,
+    call_next: Any,
+) -> Any:
+    """Bind profile_id to this request; concurrent requests stay isolated."""
+    profile_id = str(
+        request.query_params.get("profile_id")
+        or DEFAULT_SETTINGS_PROFILE_ID
+    ).strip()
+    token = REQUEST_SETTINGS_PROFILE_ID.set(
+        profile_id or DEFAULT_SETTINGS_PROFILE_ID
+    )
+    try:
+        return await call_next(request)
+    finally:
+        REQUEST_SETTINGS_PROFILE_ID.reset(token)
+
+
 _BASE_RESOLVE_DETECTED_STATE = resolve_detected_state
 PERSISTENT_STATE_FIELDS = (
     DFS_MANUAL_FIELD,
+    SPECIAL_MANUAL_FIELD,
     "dfs_original_page_description",
     "page_operations",
+    "special_operations",
     "page_variants",
     "merged_candidates",
     "continued_captures",
     "manual_recognition_profiles",
-    "manual_page",
 )
 
 
 def recognition_texts(state: Dict[str, Any]) -> List[str]:
-    """Return the stable text subset used by manually bound page recognition."""
     signature = state.get("signature") or {}
     values = signature.get("texts_any") if isinstance(signature, dict) else []
     texts: List[str] = []
@@ -122,20 +181,13 @@ def recognition_texts(state: Dict[str, Any]) -> List[str]:
 
 
 def build_manual_recognition_profile(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a reusable page fingerprint for title-less or otherwise ambiguous pages."""
     raw_page_name = str(state.get("raw_page_name") or state.get("page_name") or "").strip()
     nav_key = str(state.get("nav_key") or "").strip()
     title = str(state.get("last_title") or "").strip()
     texts = recognition_texts(state)
     if not nav_key and not title and not texts:
-        raise ValueError(
-            "当前页面没有可复用的 nav_key、标题或稳定文本，暂时无法建立自动识别指纹。"
-        )
-    identity = json.dumps(
-        [raw_page_name, nav_key, title, sorted(texts)],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+        raise ValueError("当前页面没有可复用的 nav_key、标题或稳定文本，无法建立页面识别指纹。")
+    identity = json.dumps([raw_page_name, nav_key, title, sorted(texts)], ensure_ascii=False, separators=(",", ":"))
     return {
         "profile_id": f"page_recognition_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:12]}",
         "created_at": now_iso(),
@@ -147,46 +199,28 @@ def build_manual_recognition_profile(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def manual_recognition_score(detected: Dict[str, Any], profile: Dict[str, Any]) -> int:
-    """Score one manually maintained fingerprint against a newly detected state."""
     detected_raw = str(detected.get("raw_page_name") or detected.get("page_name") or "").strip()
     profile_raw = str(profile.get("raw_page_name") or "").strip()
     if profile_raw and detected_raw and profile_raw != detected_raw:
         return -1
-
     detected_nav = str(detected.get("nav_key") or "").strip()
     profile_nav = str(profile.get("nav_key") or "").strip()
     if profile_nav:
         return 10000 if detected_nav and detected_nav == profile_nav else -1
-
     detected_title = str(detected.get("last_title") or "").strip()
     profile_title = str(profile.get("title") or "").strip()
     if profile_title and detected_title and profile_title != detected_title:
         return -1
-
-    profile_texts = {
-        str(value or "").strip()
-        for value in profile.get("texts_any", []) or []
-        if str(value or "").strip()
-    }
+    profile_texts = {str(v or "").strip() for v in profile.get("texts_any", []) or [] if str(v or "").strip()}
     detected_texts = set(recognition_texts(detected))
     if not profile_texts or not detected_texts:
         return 100 if profile_title and detected_title == profile_title else -1
-
     shared = len(profile_texts & detected_texts)
-    threshold = 1 if len(profile_texts) == 1 else max(
-        2,
-        (min(len(profile_texts), len(detected_texts)) + 1) // 2,
-    )
-    if shared < threshold:
-        return -1
-    return shared * 10 + (5 if profile_title and detected_title == profile_title else 0)
+    threshold = 1 if len(profile_texts) == 1 else max(2, (min(len(profile_texts), len(detected_texts)) + 1) // 2)
+    return shared * 10 if shared >= threshold else -1
 
 
-def preserve_stored_state_fields(
-    graph: Dict[str, Any],
-    detected: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Never let a fresh capture erase manually maintained or accumulated page data."""
+def preserve_stored_state_fields(graph: Dict[str, Any], detected: Dict[str, Any]) -> Dict[str, Any]:
     page_name = str(detected.get("page_name") or "").strip()
     stored = graph.get("states", {}).get(page_name, {})
     if not isinstance(stored, dict):
@@ -195,18 +229,12 @@ def preserve_stored_state_fields(
     for key in PERSISTENT_STATE_FIELDS:
         if key in stored:
             state[key] = stored[key]
-    if isinstance(stored.get(DFS_MANUAL_FIELD), dict):
-        if stored.get("page_description") not in (None, ""):
-            state["page_description"] = stored["page_description"]
+    if isinstance(stored.get(DFS_MANUAL_FIELD), dict) and stored.get("page_description") not in (None, ""):
+        state["page_description"] = stored["page_description"]
     return state
 
 
-def resolve_detected_state(
-    graph: Dict[str, Any],
-    detected: Dict[str, Any],
-    preferred_page: str = "",
-) -> Dict[str, Any]:
-    """Resolve page identity with manual bindings first, then fall back to legacy rules."""
+def resolve_detected_state(graph: Dict[str, Any], detected: Dict[str, Any], preferred_page: str = "") -> Dict[str, Any]:
     matches: List[tuple[int, str, Dict[str, Any]]] = []
     for page_name, stored in graph.get("states", {}).items():
         if not isinstance(stored, dict):
@@ -217,7 +245,6 @@ def resolve_detected_state(
             score = manual_recognition_score(detected, profile)
             if score >= 0:
                 matches.append((score, str(page_name), stored))
-
     resolved: Optional[Dict[str, Any]] = None
     if matches:
         best_score = max(item[0] for item in matches)
@@ -228,16 +255,12 @@ def resolve_detected_state(
             _, page_name, stored = selected
             resolved = dict(detected)
             resolved["page_name"] = page_name
-            resolved.setdefault(
-                "raw_page_name",
-                str(detected.get("raw_page_name") or detected.get("page_name") or ""),
-            )
+            resolved.setdefault("raw_page_name", str(detected.get("raw_page_name") or detected.get("page_name") or ""))
             for key in ("parent_page", "parent_title", "context_key", "entry_identity"):
                 if key in stored:
                     resolved[key] = stored[key]
             if stored.get("page_description"):
                 resolved["page_description"] = stored["page_description"]
-
     if resolved is None:
         resolved = _BASE_RESOLVE_DETECTED_STATE(graph, detected, preferred_page)
     return preserve_stored_state_fields(graph, resolved)
@@ -248,7 +271,6 @@ def protect_manual_dfs_transition(
     to_page: str,
     transition: Dict[str, Any],
 ) -> None:
-    """Keep a re-recorded incoming edge aligned with the destination's manual DFS locator."""
     state = graph.get("states", {}).get(to_page, {})
     manual = state.get(DFS_MANUAL_FIELD) if isinstance(state, dict) else None
     path_snapshot = manual.get("path_snapshot") if isinstance(manual, dict) else None
@@ -257,16 +279,12 @@ def protect_manual_dfs_transition(
     manual_target = path_snapshot[-1]
     if not isinstance(manual_target, dict):
         return
-
     steps = transition.get("steps")
     if isinstance(steps, list) and steps:
         last_step = steps[-1]
         if isinstance(last_step, dict) and isinstance(last_step.get("target"), dict):
             replace_navigation_target_locator(last_step["target"], manual_target)
-    if (
-        isinstance(transition.get("target"), dict)
-        and (not isinstance(steps, list) or len(steps) <= 1)
-    ):
+    if isinstance(transition.get("target"), dict) and (not isinstance(steps, list) or len(steps) <= 1):
         replace_navigation_target_locator(transition["target"], manual_target)
 
 
@@ -284,33 +302,18 @@ def validate_manual_page_name(page_name: str) -> str:
 
 
 def create_manual_page(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Create a manually named page from the current physical UI without a transition."""
     page_name = validate_manual_page_name(str(payload.get("page_name") or ""))
     page_description = str(payload.get("page_description") or "").strip()
     if not page_description:
         raise ValueError("page_description 不能为空")
-
     snapshot = capture_state_without_graph_write()
     graph = config.graphs.load()
     states = graph.setdefault("states", {})
     if page_name in states:
         raise ValueError(f"目标 page_name 已存在：{page_name}")
-
-    detected = dict(snapshot["state"])
-    profile = build_manual_recognition_profile(detected)
-    profile_id = str(profile["profile_id"])
-    for stored in states.values():
-        if not isinstance(stored, dict):
-            continue
-        profiles = stored.get("manual_recognition_profiles")
-        if isinstance(profiles, list):
-            profiles[:] = [
-                item for item in profiles
-                if not isinstance(item, dict) or item.get("profile_id") != profile_id
-            ]
-
+    profile = build_manual_recognition_profile(snapshot["state"])
     state = {
-        **detected,
+        **snapshot["state"],
         "page_name": page_name,
         "page_description": page_description,
         "manual_page": True,
@@ -319,163 +322,59 @@ def create_manual_page(payload: Dict[str, Any]) -> Dict[str, Any]:
     states[page_name] = state
     config.graphs.save(graph)
     save_current_path_session(config.work_dir, page_name)
-    current = read_current_state(
-        snapshot=snapshot,
-        graph=graph,
-        active_page=page_name,
-        message=(
-            f"已新增并绑定人工页面 {page_description}（{page_name}）。"
-            "该页面不会自动生成到达路径，请在页面详情中人工维护 DFS path_snapshot。"
-        ),
-    )
-    return {**current, "created_page": page_name, "recognition_profile": profile}
+    current = read_current_state(snapshot=snapshot, graph=graph, active_page=page_name)
+    return {**current, "created_page": page_name, "recognition_profile": profile,
+            "message": f"已新增并绑定人工页面 {page_description}（{page_name}）。请继续人工维护该页面 DFS。"}
 
 
-def is_special_page_operation(operation: Any) -> bool:
-    if not isinstance(operation, dict):
-        return False
-    effect = str(operation.get("effect") or "").strip()
-    return bool(
-        effect.startswith(SPECIAL_EFFECT_PREFIX)
-        or effect == "open_popup"
-        or str(operation.get("popup_type") or "").strip()
-        or str(operation.get("operation_kind") or "").strip() == "special_operate"
-    )
-
-
-def normalize_special_step(step: Any, operation_index: int, step_index: int) -> Dict[str, Any]:
-    if not isinstance(step, dict):
-        raise ValueError(f"operation{operation_index} 第 {step_index} 步必须是对象")
-    step_type = str(step.get("type") or "").strip()
-    value = step.get("value")
-    if not step_type:
-        raise ValueError(f"operation{operation_index} 第 {step_index} 步 type 不能为空")
-    if value in (None, "", []):
-        raise ValueError(f"operation{operation_index} 第 {step_index} 步 value 不能为空")
-    normalized: Dict[str, Any] = {"type": step_type, "value": value}
-    for field in ("key_description", "step_prompt"):
-        text = str(step.get(field) or "").strip()
-        if text:
-            normalized[field] = text
-    if "key_description" not in normalized and "step_prompt" in normalized:
-        normalized["key_description"] = normalized["step_prompt"]
-    if "step_prompt" not in normalized and "key_description" in normalized:
-        normalized["step_prompt"] = normalized["key_description"]
-    return normalized
-
-
-def normalize_special_opearte(value: Any) -> List[List[Dict[str, Any]]]:
-    if value in (None, ""):
-        return []
-    if not isinstance(value, dict):
-        raise ValueError("special_opearte 必须是对象，例如 operation1: [...] ")
-    entries: List[tuple[int, str, Any]] = []
-    for key, steps in value.items():
-        match = re.fullmatch(r"operation(\d+)", str(key))
-        if not match:
-            raise ValueError(f"special_opearte 键名无效：{key}；必须使用 operation1、operation2 ...")
-        entries.append((int(match.group(1)), str(key), steps))
-    entries.sort(key=lambda item: item[0])
-    expected = list(range(1, len(entries) + 1))
-    actual = [item[0] for item in entries]
-    if actual != expected:
-        raise ValueError("special_opearte 必须从 operation1 开始连续编号")
-
-    groups: List[List[Dict[str, Any]]] = []
-    for operation_index, _, steps in entries:
-        if not isinstance(steps, list) or not steps:
-            raise ValueError(f"operation{operation_index} 必须是非空数组")
-        groups.append([
-            normalize_special_step(step, operation_index, step_index)
-            for step_index, step in enumerate(steps, start=1)
-        ])
-    return groups
-
-
-def maintain_special_opearte(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Replace one page's special/popup structure from a complete ordered payload."""
+def maintain_special_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
     page_name = str(payload.get("page_name") or "").strip()
     graph = config.graphs.load()
     state = graph.get("states", {}).get(page_name)
     if not isinstance(state, dict):
         raise ValueError(f"页面不存在：{page_name}")
-
-    groups = normalize_special_opearte(payload.get("special_opearte") or {})
     backup = config.graphs.backup()
-    existing_operations = state.get("page_operations")
-    if not isinstance(existing_operations, list):
-        existing_operations = []
-
-    managed_ids = {
-        str(item.get("operation_id") or "")
-        for item in existing_operations
-        if is_special_page_operation(item)
-    }
-    ordinary_operations = [
-        item for item in existing_operations
-        if not is_special_page_operation(item)
-    ]
-
-    # Remove candidates that were created only by a special/popup operation being replaced.
-    merged_candidates = state.get("merged_candidates")
-    if isinstance(merged_candidates, list) and managed_ids:
-        merged_candidates[:] = [
-            item for item in merged_candidates
-            if str(item.get("source_operation_id") or "") not in managed_ids
-            and str(item.get("requires_operation_id") or "") not in managed_ids
-        ]
-
-    max_index = 0
-    for item in ordinary_operations:
-        operation_id = str(item.get("operation_id") or "")
-        suffix = operation_id.removeprefix("operation")
-        if operation_id.startswith("operation") and suffix.isdigit():
-            max_index = max(max_index, int(suffix))
-
-    rebuilt: List[Dict[str, Any]] = []
-    stamp = str(int(time.time() * 1000))
-    for operation_index, steps in enumerate(groups, start=1):
-        session_id = f"manual_{stamp}_{operation_index}"
-        for step_index, step in enumerate(steps, start=1):
-            max_index += 1
-            operation_id = f"operation{max_index}"
-            step_type = str(step.get("type") or "")
-            is_popup = step_type in POPUP_TYPE_SET
-            operation: Dict[str, Any] = {
-                "operation_id": operation_id,
-                "created_at": now_iso(),
-                "operate": "tap",
-                "effect": (
-                    "open_popup"
-                    if is_popup
-                    else f"{SPECIAL_EFFECT_PREFIX}{session_id}::step{step_index}"
-                ),
-                "target": dict(step),
-            }
-            if is_popup:
-                operation["popup_type"] = step_type
-            else:
-                operation["operation_kind"] = "special_operate"
-            rebuilt.append(operation)
-
-    state["page_operations"] = [*ordinary_operations, *rebuilt]
+    if payload.get("clear"):
+        state.pop(SPECIAL_MANUAL_FIELD, None)
+        message = "已恢复自动生成 special DFS。"
+    else:
+        special = normalize_special(payload.get("special") or {})
+        state[SPECIAL_MANUAL_FIELD] = special
+        message = "已保存 special DFS 人工维护数据。"
     config.graphs.save(graph)
-    compact_result = export_compact_dfs({"page_name": page_name})
-    refreshed_graph = config.graphs.load()
-    refreshed_state = refreshed_graph.get("states", {}).get(page_name, {})
-    special_opearte = build_special_operations(refreshed_state)
+    compact = export_compact_dfs({})
     return {
         "page_name": page_name,
-        "special_opearte": special_opearte,
+        "special": build_special_operations(state),
+        "special_manual": state.get(SPECIAL_MANUAL_FIELD),
         "graph_backup": backup,
-        "output_path": compact_result["output_path"],
-        "record_count": compact_result["record_count"],
-        "message": (
-            f"已保存 {len(groups)} 组 special_opearte，并按 operation1 → operation{len(groups)} 的顺序持久化。"
-            if groups
-            else "已清空当前页面的 special_opearte。"
-        ),
+        "output_path": compact["output_path"],
+        "message": f"{message} 已同步更新 settings_navigation_paths.json。",
     }
+
+
+def cancel_special_capture(payload: Dict[str, Any]) -> Dict[str, Any]:
+    page_name = str(payload.get("page_name") or "").strip()
+    session_id = str(payload.get("session_id") or "").strip()
+    if not page_name or not session_id:
+        raise ValueError("取消 special 采集需要 page_name 和 session_id")
+    graph = config.graphs.load()
+    state = graph.get("states", {}).get(page_name)
+    if not isinstance(state, dict):
+        raise ValueError(f"页面不存在：{page_name}")
+    prefix = f"special_capture::{session_id}::"
+    operations = state.get("special_operations")
+    removed = 0
+    if isinstance(operations, list):
+        kept = []
+        for operation in operations:
+            if isinstance(operation, dict) and str(operation.get("effect") or "").startswith(prefix):
+                removed += 1
+            else:
+                kept.append(operation)
+        state["special_operations"] = kept
+    config.graphs.save(graph)
+    return {**read_current_state(capture=False), "message": f"已取消本组 special 采集并回滚 {removed} 步。"}
 
 
 def ok_response(**kwargs: Any) -> JSONResponse:
@@ -484,6 +383,7 @@ def ok_response(**kwargs: Any) -> JSONResponse:
 
 @app.exception_handler(Exception)
 def api_error(_request: Request, exc: Exception) -> JSONResponse:
+    """所有 API 使用统一错误结构，业务路由只保留正常流程。"""
     return JSONResponse({"ok": False, "error": str(exc)})
 
 
@@ -495,6 +395,7 @@ def read_current_state(
     active_page: str = "",
     message: str = "",
 ) -> Dict[str, Any]:
+    """读取 latest 或复用刚采集的 snapshot，统一生成前端状态。"""
     graph = graph if graph is not None else config.graphs.load()
     if snapshot:
         root_json, state = snapshot["root"], snapshot["state"]
@@ -519,6 +420,8 @@ def read_current_state(
         if isinstance(stored_state, dict):
             state.update({key: stored_state[key] for key in ("page_operations", "page_variants", "merged_candidates") if key in stored_state})
         candidates = extract_navigation_candidates(root_json)
+        # GET /api/state 只读。否则删除当前孤儿页后，浏览器刷新会根据仍停留
+        # 在该页的旧 UI 树立即把它写回导航图；只有显式“采集当前界面”才落图。
         if capture:
             graph["states"][state["page_name"]] = state
             for candidate in candidates:
@@ -551,6 +454,9 @@ def read_current_state(
         "warning": warning,
         "screenshot_url": f"/screen?t={int(time.time() * 1000)}",
         "screen_metrics": screen_metrics_from_root(root_json),
+        "settings_profile": config.settings_profiles.get_profile(
+            config.profile_id
+        ),
     }
     if message:
         response["message"] = message
@@ -558,6 +464,7 @@ def read_current_state(
 
 
 def capture_state_without_graph_write() -> Dict[str, Any]:
+    """采集并解析设备状态，但不修改导航图。"""
     if not capture_device(config.device_id, config.output_dir, include_screen=True):
         raise RuntimeError("hdc 采集失败，请检查设备连接、hdc PATH 和授权状态")
     root_json = load_json(config.output_dir / "current_ui_tree.json")
@@ -576,19 +483,32 @@ def normalize_popup_type(value: Any) -> str:
     return popup_type
 
 
-def page_display_description(graph: Dict[str, Any], page_name: str) -> str:
+def page_display_description(
+    graph: Dict[str, Any],
+    page_name: str,
+) -> str:
     state = graph.get("states", {}).get(page_name, {})
     if not isinstance(state, dict):
         return page_name
     manual = state.get(DFS_MANUAL_FIELD)
     display_record = manual if isinstance(manual, dict) else {
-        "page_description": state.get("page_description") or state.get("last_title") or "",
+        "page_description": (
+            state.get("page_description")
+            or state.get("last_title")
+            or ""
+        ),
         "path_snapshot": [],
     }
-    return dfs_record_display_name(display_record, page_name)
+    return dfs_record_display_name(
+        display_record,
+        page_name,
+    )
 
 
-def transition_with_descriptions(graph: Dict[str, Any], transition: Dict[str, Any]) -> Dict[str, Any]:
+def transition_with_descriptions(
+    graph: Dict[str, Any],
+    transition: Dict[str, Any],
+) -> Dict[str, Any]:
     from_page = str(transition.get("from_page") or "")
     to_page = str(transition.get("to_page") or "")
     return {
@@ -598,26 +518,45 @@ def transition_with_descriptions(graph: Dict[str, Any], transition: Dict[str, An
     }
 
 
-def sync_single_incoming_transition_target(graph: Dict[str, Any], page_name: str, manual_target: Dict[str, Any]) -> bool:
+def sync_single_incoming_transition_target(
+    graph: Dict[str, Any],
+    page_name: str,
+    manual_target: Dict[str, Any],
+) -> bool:
+    """Synchronize the final DFS step when the page has one unambiguous entry."""
     incoming = [
-        transition for transition in graph.get("transitions", [])
-        if isinstance(transition, dict) and transition.get("to_page") == page_name
+        transition
+        for transition in graph.get("transitions", [])
+        if isinstance(transition, dict)
+        and transition.get("to_page") == page_name
     ]
     if len(incoming) != 1:
         return False
+
     transition = incoming[0]
     steps = transition.get("steps")
     step_target_value: Optional[Dict[str, Any]] = None
     if isinstance(steps, list) and steps:
         last_step = steps[-1]
-        if isinstance(last_step, dict) and isinstance(last_step.get("target"), dict):
-            step_target_value = last_step["target"]
-    if step_target_value is None and isinstance(transition.get("target"), dict):
-        step_target_value = transition["target"]
-    if step_target_value is None or not replace_navigation_target_locator(step_target_value, manual_target):
+        if isinstance(last_step, dict):
+            target = last_step.get("target")
+            if isinstance(target, dict):
+                step_target_value = target
+    if step_target_value is None:
+        target = transition.get("target")
+        if isinstance(target, dict):
+            step_target_value = target
+    if step_target_value is None:
         return False
+
+    if not replace_navigation_target_locator(step_target_value, manual_target):
+        return False
+
+    # 单步 transition 的顶层 target 与 steps[0].target 是两份 JSON 时，
+    # 同步两处，保证旧数据和页面详情使用任何一种表示都能看到新描述。
     if (
-        isinstance(steps, list) and len(steps) == 1
+        isinstance(steps, list)
+        and len(steps) == 1
         and isinstance(transition.get("target"), dict)
         and transition["target"] is not step_target_value
     ):
@@ -626,6 +565,7 @@ def sync_single_incoming_transition_target(graph: Dict[str, Any], page_name: str
 
 
 def maintain_page_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Save or clear the exact DFS record maintained for one page."""
     original_description_field = "dfs_original_page_description"
     page_name = str(payload.get("page_name") or "").strip()
     graph = config.graphs.load()
@@ -663,9 +603,13 @@ def maintain_page_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
         for index, target in enumerate(raw_path, start=1):
             formatted = format_path_target(target)
             if not formatted:
-                raise ValueError(f"path_snapshot 第 {index} 步无效：type 只能是 key/text，且 value 不能为空")
+                raise ValueError(
+                    f"path_snapshot 第 {index} 步无效：type 只能是 key/text，且 value 不能为空"
+                )
             path_snapshot.append(formatted)
-        root_page = str(graph.get("traversal_config", {}).get("root_page") or "Pages_root")
+        root_page = str(
+            graph.get("traversal_config", {}).get("root_page") or "Pages_root"
+        )
         if page_name == root_page and path_snapshot:
             raise ValueError("根页面 path_snapshot 必须为空")
         if page_name != root_page and not path_snapshot:
@@ -681,7 +625,9 @@ def maintain_page_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
         state["page_description"] = page_description
         transition_synced = sync_single_incoming_transition_target(
-            graph, page_name, path_snapshot[-1] if path_snapshot else {},
+            graph,
+            page_name,
+            path_snapshot[-1] if path_snapshot else {},
         ) if page_name != root_page else False
         updated_descendant_pages = sync_descendant_manual_dfs_prefixes(
             graph,
@@ -693,12 +639,15 @@ def maintain_page_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
         descendant_message = (
             f"，并级联更新 {len(updated_descendant_pages)} 个下级页面的人工 DFS 路径"
-            if updated_descendant_pages else ""
+            if updated_descendant_pages
+            else ""
         )
         message = (
-            f"已保存 DFS 人工维护数据，并同步当前页面唯一入边的目标描述{descendant_message}。"
+            f"已保存 DFS 人工维护数据，并同步当前页面唯一入边的目标描述"
+            f"{descendant_message}。"
             if transition_synced
-            else f"已保存 DFS 人工维护数据{descendant_message}；后续导出将优先使用该记录。"
+            else f"已保存 DFS 人工维护数据{descendant_message}；"
+            "后续导出将优先使用该记录。"
         )
 
     config.graphs.save(graph)
@@ -712,16 +661,32 @@ def maintain_page_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
         "record_count": compact_result["record_count"],
         "unreachable_pages": compact_result["unreachable_pages"],
         "updated_descendant_pages": updated_descendant_pages,
-        "message": f"{message} 已同步更新 settings_navigation_paths.json，共 {compact_result['record_count']} 条路径。",
+        "message": (
+            f"{message} 已同步更新 settings_navigation_paths.json，"
+            f"共 {compact_result['record_count']} 条路径。"
+        ),
     }
 
 
-def export_compact_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
-    graph = config.graphs.load()
-    root_page = str(graph.get("traversal_config", {}).get("root_page") or "Pages_root")
+def export_compact_dfs(
+    payload: Dict[str, Any],
+    *,
+    work_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Generate the complete compact DFS file from the current graph."""
+    target_work_dir = Path(work_dir) if work_dir else config.work_dir
+    graph = NavigationGraphRepository(target_work_dir).load()
+    root_page = str(
+        graph.get("traversal_config", {}).get("root_page") or "Pages_root"
+    )
     records, unreachable = export_dfs_paths(graph, root_page)
     output = format_dfs_records(records, graph)
-    output_path = config.work_dir / "outputs" / "navigation" / "settings_navigation_paths.json"
+    output_path = (
+        target_work_dir
+        / "outputs"
+        / "navigation"
+        / "settings_navigation_paths.json"
+    )
     save_json(output, output_path, "DFS 精简路径")
     page_name = str(payload.get("page_name") or "").strip()
     result: Dict[str, Any] = {
@@ -745,12 +710,7 @@ def record_page_operation(
     manual_label: str = "",
     popup_type: str = "",
 ) -> Dict[str, Any]:
-    """Record an operation bound to the page active before the click.
-
-    ``special`` is explicitly user-declared. It never uses page-change
-    recognition to decide whether the operation is valid; even if the resulting
-    UI resembles another page, the operation stays attached to ``active_page``.
-    """
+    """统一录制页面内操作；popup 始终归属点击前的 active_page。"""
     if mode not in {"popup", "same_page", "gesture", "special"}:
         raise ValueError(f"未知页面内操作模式：{mode}")
 
@@ -785,11 +745,14 @@ def record_page_operation(
         "gesture": "page_gesture_operation",
         "special": "special_operate_step",
     }[mode]
-    append_web_history(config.work_dir, {
-        "event": event_name,
-        "page_name": active_page,
-        "debug": debug,
-    })
+    append_web_history(
+        config.work_dir,
+        {
+            "event": event_name,
+            "page_name": active_page,
+            "debug": debug,
+        },
+    )
 
     if target.get("needs_manual_label"):
         current = (
@@ -820,12 +783,7 @@ def record_page_operation(
         execute_device_input(config.device_id, "tap", [int(x), int(y)])
     time.sleep(1.0 if mode == "gesture" else 1.2)
     after = capture_state_without_graph_write()
-    before_page_name = str(before["state"].get("page_name") or "")
-    after_page_name = str(after["state"].get("page_name") or "")
-    if mode not in {"popup", "special"} and (
-        (before_page_name and after_page_name and before_page_name != after_page_name)
-        or not states_represent_same_page(after["state"], before["state"])
-    ):
+    if mode not in {"popup", "special"} and not states_represent_same_page(after["state"], before["state"]):
         message = (
             "执行后进入了新页面，请使用页面跳转录制，不要保存为页面内操作。"
             if mode == "gesture"
@@ -842,28 +800,31 @@ def record_page_operation(
     hidden = [item for key, item in before_map.items() if key not in after_map]
     state = graph.setdefault("states", {}).setdefault(active_page, before["state"])
     state.update(before["state"])
-
     if mode in {"popup", "special"}:
         max_index = 0
-        for item in state.get("page_operations", []) or []:
-            existing_id = str(item.get("operation_id") or "")
-            suffix = existing_id.removeprefix("operation")
-            if existing_id.startswith("operation") and suffix.isdigit():
-                max_index = max(max_index, int(suffix))
+        for operation_list in (
+            state.get("page_operations", []) or [],
+            state.get("special_operations", []) or [],
+        ):
+            for item in operation_list:
+                if not isinstance(item, dict):
+                    continue
+                existing_id = str(item.get("operation_id") or "")
+                suffix = existing_id.removeprefix("operation")
+                if existing_id.startswith("operation") and suffix.isdigit():
+                    max_index = max(max_index, int(suffix))
         operation_id = f"operation{max_index + 1}"
     else:
         description = str(target.get("key_description") or target.get("step_prompt") or target.get("value") or "操作")
         safe_description = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in description).strip("_") or "operation"
         digest = hashlib.sha1(json.dumps([active_page, target.get("type"), target.get("value"), description], ensure_ascii=False).encode("utf-8")).hexdigest()[:8]
         operation_id = f"{active_page}__op__{safe_description}_{digest}"
-
     if mode == "same_page":
         revealed = [
             {**item, "source": "page_operation", "source_operation_id": operation_id, "requires_operation_id": operation_id}
             for item in revealed
         ]
         hidden = [{**item, "source_operation_id": operation_id} for item in hidden]
-
     operation_target = dict(target)
     if mode == "popup":
         operation_target["type"] = selected_popup_type
@@ -890,12 +851,11 @@ def record_page_operation(
         operation["operation_kind"] = "special_operate"
     if mode not in {"gesture", "special"}:
         operation.update({"revealed_candidates": revealed, "hidden_candidates": hidden})
-    operations = state.setdefault("page_operations", [])
+    operations = state.setdefault("special_operations" if mode == "special" else "page_operations", [])
     if mode not in {"popup", "special"}:
         operations[:] = [item for item in operations if item.get("operation_id") != operation_id]
     operations.append(operation)
     upsert_clicked_target_as_candidate(graph, active_page, target, operation_id=operation_id)
-
     if mode == "same_page":
         variant_payload = [
             str(state.get("page_name") or active_page),
@@ -927,22 +887,25 @@ def record_page_operation(
             upsert_candidate(state, item)
     config.graphs.save(graph)
 
+    if mode == "special":
+        return read_current_state(
+            snapshot={"root": after["root"], "state": before["state"]},
+            graph=graph,
+            active_page=active_page,
+            message="已记录 special_operate 当前步骤；继续点击可录制下一步。",
+        )
     if mode == "popup":
-        message = f"已记录弹窗操作 {operation_id}（{selected_popup_type}）：新增 {len(revealed)} 个控件，消失 {len(hidden)} 个控件。"
+        message = (
+            f"已记录弹窗操作 {operation_id}（{selected_popup_type}）："
+            f"新增 {len(revealed)} 个控件，消失 {len(hidden)} 个控件。"
+        )
+        # 保留点击前页面身份，只用点击后的树刷新截图、候选控件和屏幕尺寸。
         return read_current_state(
             snapshot={"root": after["root"], "state": before["state"]},
             graph=graph,
             active_page=active_page,
             message=message,
         )
-    if mode == "special":
-        return read_current_state(
-            snapshot={"root": after["root"], "state": before["state"]},
-            graph=graph,
-            active_page=active_page,
-            message=f"已记录 special_operate 步骤 {operation_id}，仍绑定在页面 {page_display_description(graph, active_page)}。",
-        )
-
     refreshed = read_current_state(capture=False)
     message = (
         f"已记录页面内变化：新增 {len(revealed)} 个控件，消失 {len(hidden)} 个控件。"
@@ -986,15 +949,15 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
         from_page,
         current.get("active_state") or current.get("state") or {"page_name": from_page},
     )
-    resolved_after_page = str(after_capture["state"].get("page_name") or "")
-    same_page = (
-        (not resolved_after_page or resolved_after_page == from_page)
-        and states_represent_same_page(after_capture["state"], from_state)
-    )
+    same_page = states_represent_same_page(after_capture["state"], from_state)
     if same_page:
-        after_capture["state"] = resolve_detected_state(graph, after_capture["state"], from_page)
+        after_capture["state"] = resolve_detected_state(
+            graph, after_capture["state"], from_page
+        )
     else:
-        after_capture["state"] = contextualize_child_state(graph, from_page, after_capture["state"], target)
+        after_capture["state"] = contextualize_child_state(
+            graph, from_page, after_capture["state"], target
+        )
     after = read_current_state(snapshot=after_capture, graph=graph, active_page=from_page)
     to_page = after["state"]["page_name"]
     if same_page:
@@ -1012,7 +975,12 @@ def record_tap_at_point(x: int, y: int, expect: str = "new_page", effect: str = 
             "updated_at": now_iso(),
         }, config.work_dir / "outputs" / "navigation" / "pending_action_chain.json", "未完成多步骤跳转")
         message = f"已记录第 {len(steps)} 步，继续点击临时菜单/弹层中的目标控件；进入新页面后会保存为一条多步骤跳转。"
-        return read_current_state(snapshot=after_capture, graph=graph, active_page=from_page, message=message)
+        return read_current_state(
+            snapshot=after_capture,
+            graph=graph,
+            active_page=from_page,
+            message=message,
+        )
 
     steps = list(chain.get("steps", [])) if chain else []
     steps.append({"operate": "tap", "target": step_target(target)})
@@ -1049,37 +1017,27 @@ def api_console_action(req: ActionRequest) -> JSONResponse:
     payload = req.payload or {}
     if action == "capture_current":
         return ok_response(**read_current_state(capture=True))
-    if action == "create_manual_page":
-        return ok_response(**create_manual_page(payload))
     if action == "bind_current_page":
         page_name = str(payload.get("page_name") or "").strip()
         graph = config.graphs.load()
-        states = graph.setdefault("states", {})
-        target_state = states.get(page_name)
+        target_state = graph.setdefault("states", {}).get(page_name)
         if not isinstance(target_state, dict):
             raise ValueError(f"页面不存在：{page_name}")
         snapshot = capture_state_without_graph_write()
         profile = build_manual_recognition_profile(snapshot["state"])
-        profile_id = str(profile["profile_id"])
-        for stored in states.values():
-            if not isinstance(stored, dict):
-                continue
-            profiles = stored.get("manual_recognition_profiles")
-            if isinstance(profiles, list):
-                profiles[:] = [
-                    item for item in profiles
-                    if not isinstance(item, dict) or item.get("profile_id") != profile_id
-                ]
-        target_state.setdefault("manual_recognition_profiles", []).append(profile)
+        profiles = target_state.setdefault("manual_recognition_profiles", [])
+        profiles[:] = [item for item in profiles if not isinstance(item, dict) or item.get("profile_id") != profile["profile_id"]]
+        profiles.append(profile)
         config.graphs.save(graph)
         save_current_path_session(config.work_dir, page_name)
-        current = read_current_state(
-            snapshot=snapshot,
-            graph=graph,
-            active_page=page_name,
-            message=f"已将当前设备界面绑定为 {page_display_description(graph, page_name)}；后续进入会优先按该识别指纹回认。",
-        )
+        current = read_current_state(snapshot=snapshot, graph=graph, active_page=page_name, message=f"已将当前界面绑定为 {page_display_description(graph, page_name)}。")
         return ok_response(**current, recognition_profile=profile)
+    if action == "create_manual_page":
+        return ok_response(**create_manual_page(payload))
+    if action == "maintain_special_dfs":
+        return ok_response(**maintain_special_dfs(payload))
+    if action == "cancel_special_capture":
+        return ok_response(**cancel_special_capture(payload))
     if action == "system_back":
         graph = config.graphs.load()
         active_page = current_session_page(config.work_dir)
@@ -1113,7 +1071,9 @@ def api_console_action(req: ActionRequest) -> JSONResponse:
         if not isinstance(ordered_transition_ids, list):
             raise ValueError("ordered_transition_ids 必须是数组")
         graph = config.graphs.load()
-        persisted_order = NavigationGraph(graph).reorder_children(parent_page, ordered_transition_ids)
+        persisted_order = NavigationGraph(graph).reorder_children(
+            parent_page, ordered_transition_ids,
+        )
         config.graphs.save(graph)
         return ok_response(
             parent_page=parent_page,
@@ -1122,8 +1082,6 @@ def api_console_action(req: ActionRequest) -> JSONResponse:
         )
     if action == "maintain_page_dfs":
         return ok_response(**maintain_page_dfs(payload))
-    if action == "maintain_special_opearte":
-        return ok_response(**maintain_special_opearte(payload))
     if action == "export_dfs_compact":
         return ok_response(**export_compact_dfs(payload))
     if action == "continue_current_page":
@@ -1155,7 +1113,11 @@ def api_console_action(req: ActionRequest) -> JSONResponse:
         if direction not in {"left", "right"}:
             raise ValueError("direction 必须是 left 或 right")
         current = read_current_state(capture=False)
-        execute_device_input(config.device_id, f"horizontal_{direction}", metrics=current.get("screen_metrics", {}))
+        execute_device_input(
+            config.device_id,
+            f"horizontal_{direction}",
+            metrics=current.get("screen_metrics", {}),
+        )
         graph = config.graphs.load()
         active_page = str(current["active_page"])
         base_page = str(current["active_state"].get("base_page") or active_page)
@@ -1200,6 +1162,38 @@ def api_state() -> JSONResponse:
     return ok_response(**read_current_state(capture=False))
 
 
+@app.get("/api/settings_profiles")
+def api_settings_profiles() -> JSONResponse:
+    return ok_response(
+        profiles=config.settings_profiles.list_profiles(),
+    )
+
+
+@app.post("/api/settings_profiles")
+def api_create_settings_profile(
+    req: CreateSettingsProfileRequest,
+) -> JSONResponse:
+    profile = config.settings_profiles.create(
+        name=req.name,
+        settings_version=req.settings_version,
+        device_model=req.device_model,
+        parent_profile_id=req.parent_profile_id,
+    )
+    profile_work_dir = config.settings_profiles.profile_work_dir(
+        profile["profile_id"]
+    )
+    compact = export_compact_dfs({}, work_dir=profile_work_dir)
+    return ok_response(
+        profile=profile,
+        inherited_from=profile.get("parent_profile_id"),
+        output_path=compact.get("output_path", ""),
+        message=(
+            f"已从 {profile.get('parent_profile_id')} 继承配置并创建"
+            f"“{profile.get('name')}”。后续修改只写入该版本/机型配置。"
+        ),
+    )
+
+
 @app.post("/api/record_action")
 def api_record_action(req: ActionRequest) -> JSONResponse:
     action = req.action.strip()
@@ -1214,7 +1208,8 @@ def api_record_action(req: ActionRequest) -> JSONResponse:
         if not isinstance(center, list) or len(center) != 2:
             raise ValueError("候选项缺少 bounds_center，无法作为临时 hit-test 输入")
         return ok_response(**record_tap_at_point(
-            int(center[0]), int(center[1]),
+            int(center[0]),
+            int(center[1]),
             expect=str(payload.get("expect") or "new_page"),
             effect=str(payload.get("effect") or ""),
             manual_label=label,
@@ -1227,17 +1222,27 @@ def api_record_action(req: ActionRequest) -> JSONResponse:
     elif action == "same_page_tap":
         data = record_page_operation(x, y, mode="same_page", manual_label=label)
     elif action == "popup_tap":
-        data = record_page_operation(x, y, mode="popup", manual_label=label, popup_type=str(payload.get("popup_type") or ""))
+        data = record_page_operation(
+            x,
+            y,
+            mode="popup",
+            manual_label=label,
+            popup_type=str(payload.get("popup_type") or ""),
+        )
     elif action == "same_page_gesture":
         data = record_page_operation(
-            x, y, mode="gesture",
+            x,
+            y,
+            mode="gesture",
             operate=str(payload.get("operate") or ""),
             effect=str(payload.get("effect") or ""),
             manual_label=label,
         )
-    else:
+    elif action == "special_tap":
         data = record_page_operation(
-            x, y, mode="special",
+            x,
+            y,
+            mode="special",
             operate=str(payload.get("operate") or "tap"),
             effect=str(payload.get("effect") or "special_operate"),
             manual_label=label,
@@ -1270,18 +1275,22 @@ def api_rename_page(req: RenamePageRequest) -> JSONResponse:
         raise ValueError(f"目标 page_name 已存在：{new_name}")
 
     backup = config.graphs.backup()
-    state = NavigationGraph(graph).rename_page(old_name, new_name, new_title=req.new_title)
+    state = NavigationGraph(graph).rename_page(
+        old_name,
+        new_name,
+        new_title=req.new_title,
+    )
     config.graphs.save(graph)
-    migrated_files = config.graphs.rename_runtime_references(old_name, new_name) if new_name != old_name else []
+    migrated_files = (
+        config.graphs.rename_runtime_references(old_name, new_name)
+        if new_name != old_name else []
+    )
     return ok_response(
-        page_name=new_name,
-        old_page_name=old_name,
+        page_name=new_name, old_page_name=old_name,
         new_title=state.get("last_title") or state.get("page_description") or new_name,
-        backup=backup,
-        migrated_files=migrated_files,
+        backup=backup, migrated_files=migrated_files,
         message=f"已修改内部页面 ID：{old_name} -> {new_name}",
     )
-
 
 @app.get("/api/page_detail")
 def api_page_detail(page_name: str) -> JSONResponse:
@@ -1293,21 +1302,32 @@ def api_page_detail(page_name: str) -> JSONResponse:
     dfs_record = dfs_record_for_page(graph, page_name) or {
         "package_name": str(graph.get("package_name") or ""),
         "main_page_name": str(graph.get("main_page_name") or ""),
-        "page_description": str(state.get("last_title") or state.get("page_description") or page_name),
+        "page_description": str(
+            state.get("last_title") or state.get("page_description") or page_name
+        ),
         "path_snapshot": [],
-        "special_opearte": {},
     }
     return ok_response(
         page_name=page_name,
         display_name=dfs_record_display_name(dfs_record, page_name),
         state=state,
-        incoming_transitions=[transition_with_descriptions(graph, item) for item in transitions if item.get("to_page") == page_name],
-        outgoing_transitions=[transition_with_descriptions(graph, item) for item in transitions if item.get("from_page") == page_name],
+        incoming_transitions=[
+            transition_with_descriptions(graph, item)
+            for item in transitions
+            if item.get("to_page") == page_name
+        ],
+        outgoing_transitions=[
+            transition_with_descriptions(graph, item)
+            for item in transitions
+            if item.get("from_page") == page_name
+        ],
         merged_candidates=get_page_merged_candidates(graph, page_name, []),
         page_operations=state.get("page_operations", []) or [],
+        special_operations=state.get("special_operations", []) or [],
+        special_record=build_special_operations(state),
+        special_manual=state.get(SPECIAL_MANUAL_FIELD),
         page_variants=state.get("page_variants", []) or [],
         continued_captures=state.get("continued_captures", []) or [],
-        special_opearte=build_special_operations(state),
         dfs_record=dfs_record,
         dfs_manual=state.get(DFS_MANUAL_FIELD),
     )

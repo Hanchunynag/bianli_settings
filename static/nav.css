@@ -25,7 +25,7 @@ body {
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -91,6 +91,174 @@ h1 { margin-bottom: 6px; font-size: 18px; font-weight: 700; }
 .actions > .controlDrawer > summary {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.profileBar {
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #f9fbfd;
+}
+
+.profileContext {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.profileContext select {
+  min-width: 260px;
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.profileInheritance {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settingsProfileDialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 24px 64px rgba(24, 34, 51, .24);
+}
+
+.settingsProfileDialog::backdrop {
+  background: rgba(24, 34, 51, .38);
+}
+
+.profileDialogHeader {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.profileDialogHeader h2 {
+  margin-bottom: 5px;
+  font-size: 18px;
+}
+
+.profileDialogHeader p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settingsProfileList {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+}
+
+.profileCard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.profileCard.isActive {
+  border-color: #9bb8e5;
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.profileCardMain {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.profileCardTitle,
+.profileCardMeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.profileCardMeta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.profileCardSource {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.settingsProfileForm {
+  display: grid;
+  gap: 10px;
+  margin: 0 16px 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.settingsProfileForm h3 {
+  font-size: 15px;
+}
+
+.settingsProfileForm label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settingsProfileForm input,
+.settingsProfileForm select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.profileFormGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.profileFormActions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .controlDrawer {
@@ -1036,6 +1204,19 @@ button.compact {
 @media (max-width: 1100px) {
   .topbar {
     grid-template-columns: minmax(260px, 1fr) minmax(180px, .8fr) auto;
+  }
+
+  .profileInheritance {
+    display: none;
+  }
+
+  .profileContext {
+    width: 100%;
+  }
+
+  .profileContext select {
+    min-width: 0;
+    flex: 1 1 auto;
   }
 
   .actions {
