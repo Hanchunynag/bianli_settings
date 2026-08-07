@@ -8,6 +8,7 @@ import hmac
 import json
 import shutil
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -58,6 +59,12 @@ from settings_ui_manual_recorder import (
     step_target,
     transition_id_for_pages,
 )
+from settings_profiles import (
+    DEFAULT_SETTINGS_PROFILE_ID,
+    CreateSettingsProfileRequest,
+    SettingsProfileManager,
+)
+
 from DFS import (
     DFS_MANUAL_FIELD,
     dfs_branch_for_page,
@@ -74,6 +81,10 @@ APP_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Settings Navigation Recorder")
 POPUP_TYPES = ("SheetWrapper", "Dialog", "MenuWrapper")
 POPUP_TYPE_SET = frozenset(POPUP_TYPES)
+REQUEST_SETTINGS_PROFILE_ID: ContextVar[str] = ContextVar(
+    "request_settings_profile_id",
+    default=DEFAULT_SETTINGS_PROFILE_ID,
+)
 
 
 class ServerConfig:
@@ -83,13 +94,55 @@ class ServerConfig:
         device_id: str = DEFAULT_DEVICE_ID,
         output_dir: Optional[Path] = None,
     ) -> None:
-        self.work_dir = Path(work_dir)
+        self.base_work_dir = Path(work_dir)
         self.device_id = device_id
-        self.output_dir = Path(output_dir) if output_dir else self.work_dir / "outputs" / "latest"
-        self.graphs = NavigationGraphRepository(self.work_dir)
+        self.output_dir = (
+            Path(output_dir)
+            if output_dir
+            else self.base_work_dir / "outputs" / "latest"
+        )
+        self.settings_profiles = SettingsProfileManager(self.base_work_dir)
+
+    @property
+    def profile_id(self) -> str:
+        profile_id = str(
+            REQUEST_SETTINGS_PROFILE_ID.get()
+            or DEFAULT_SETTINGS_PROFILE_ID
+        )
+        self.settings_profiles.get_profile(profile_id)
+        return profile_id
+
+    @property
+    def work_dir(self) -> Path:
+        return self.settings_profiles.profile_work_dir(
+            self.profile_id
+        )
+
+    @property
+    def graphs(self) -> NavigationGraphRepository:
+        return NavigationGraphRepository(self.work_dir)
 
 
 config = ServerConfig()
+
+
+@app.middleware("http")
+async def bind_settings_profile(
+    request: Request,
+    call_next: Any,
+) -> Any:
+    """Bind profile_id to this request; concurrent requests stay isolated."""
+    profile_id = str(
+        request.query_params.get("profile_id")
+        or DEFAULT_SETTINGS_PROFILE_ID
+    ).strip()
+    token = REQUEST_SETTINGS_PROFILE_ID.set(
+        profile_id or DEFAULT_SETTINGS_PROFILE_ID
+    )
+    try:
+        return await call_next(request)
+    finally:
+        REQUEST_SETTINGS_PROFILE_ID.reset(token)
 
 
 def ok_response(**kwargs: Any) -> JSONResponse:
@@ -169,6 +222,9 @@ def read_current_state(
         "warning": warning,
         "screenshot_url": f"/screen?t={int(time.time() * 1000)}",
         "screen_metrics": screen_metrics_from_root(root_json),
+        "settings_profile": config.settings_profiles.get_profile(
+            config.profile_id
+        ),
     }
     if message:
         response["message"] = message
@@ -380,16 +436,21 @@ def maintain_page_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def export_compact_dfs(payload: Dict[str, Any]) -> Dict[str, Any]:
+def export_compact_dfs(
+    payload: Dict[str, Any],
+    *,
+    work_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
     """Generate the complete compact DFS file from the current graph."""
-    graph = config.graphs.load()
+    target_work_dir = Path(work_dir) if work_dir else config.work_dir
+    graph = NavigationGraphRepository(target_work_dir).load()
     root_page = str(
         graph.get("traversal_config", {}).get("root_page") or "Pages_root"
     )
     records, unreachable = export_dfs_paths(graph, root_page)
     output = format_dfs_records(records, graph)
     output_path = (
-        config.work_dir
+        target_work_dir
         / "outputs"
         / "navigation"
         / "settings_navigation_paths.json"
@@ -827,6 +888,38 @@ def api_console_action(req: ActionRequest) -> JSONResponse:
 @app.get("/api/state")
 def api_state() -> JSONResponse:
     return ok_response(**read_current_state(capture=False))
+
+
+@app.get("/api/settings_profiles")
+def api_settings_profiles() -> JSONResponse:
+    return ok_response(
+        profiles=config.settings_profiles.list_profiles(),
+    )
+
+
+@app.post("/api/settings_profiles")
+def api_create_settings_profile(
+    req: CreateSettingsProfileRequest,
+) -> JSONResponse:
+    profile = config.settings_profiles.create(
+        name=req.name,
+        settings_version=req.settings_version,
+        device_model=req.device_model,
+        parent_profile_id=req.parent_profile_id,
+    )
+    profile_work_dir = config.settings_profiles.profile_work_dir(
+        profile["profile_id"]
+    )
+    compact = export_compact_dfs({}, work_dir=profile_work_dir)
+    return ok_response(
+        profile=profile,
+        inherited_from=profile.get("parent_profile_id"),
+        output_path=compact.get("output_path", ""),
+        message=(
+            f"已从 {profile.get('parent_profile_id')} 继承配置并创建"
+            f"“{profile.get('name')}”。后续修改只写入该版本/机型配置。"
+        ),
+    )
 
 
 @app.post("/api/record_action")
