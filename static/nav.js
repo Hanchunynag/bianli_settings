@@ -1,7 +1,7 @@
 import { api, postJson } from './nav/api.js?v=special-profile-15';
 import { el, escapeHtml } from './nav/dom.js?v=special-profile-15';
 import { store } from './nav/state.js?v=special-profile-15';
-import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=special-single-ui-19';
+import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=dfs-invalid-transition-21';
 
 const popupTypeButtons = [...document.querySelectorAll('[data-popup-type]')];
 const popupTypes = new Set(popupTypeButtons.map((button) => button.dataset.popupType));
