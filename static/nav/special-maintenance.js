@@ -2,11 +2,12 @@ import { api, postJson } from './api.js';
 import { escapeHtml } from './dom.js';
 import { store } from './state.js';
 
-const SPECIAL_PREFIX = 'special_capture::';
 let observer = null;
 let renderGeneration = 0;
 let renderScheduled = false;
 let internalMutation = false;
+let editorPage = '';
+let groups = [];
 
 function currentDetailPage() {
   return String(
@@ -18,147 +19,195 @@ function currentDetailPage() {
   ).trim();
 }
 
-function specialSession(effect) {
-  const value = String(effect || '').trim();
-  if (!value.startsWith(SPECIAL_PREFIX)) return null;
-  const parts = value.split('::');
-  if (parts.length !== 3 || !parts[1]) return null;
-  const matched = /^step(\d+)$/.exec(parts[2]);
-  if (!matched) return null;
-  return { sessionId: parts[1], stepIndex: Number(matched[1]) };
+function cloneStep(step = {}) {
+  return {
+    type: String(step.type || '').trim(),
+    value: step.value ?? '',
+    key_description: String(step.key_description || '').trim(),
+    step_prompt: String(step.step_prompt || '').trim(),
+  };
 }
 
-function targetLabel(target = {}) {
+function structureToGroups(structure) {
+  if (!structure || typeof structure !== 'object' || Array.isArray(structure)) return [];
+  return Object.entries(structure)
+    .map(([key, steps]) => {
+      const match = /^operation(\d+)$/.exec(key);
+      return match ? [Number(match[1]), steps] : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => left[0] - right[0])
+    .map(([, steps]) => (Array.isArray(steps) ? steps.map(cloneStep) : []))
+    .filter((steps) => steps.length);
+}
+
+function groupsToStructure() {
+  return Object.fromEntries(
+    groups.map((steps, index) => [
+      `operation${index + 1}`,
+      steps.map((step) => ({
+        type: String(step.type || '').trim(),
+        value: step.value,
+        ...(String(step.key_description || '').trim()
+          ? { key_description: String(step.key_description).trim() }
+          : {}),
+        ...(String(step.step_prompt || '').trim()
+          ? { step_prompt: String(step.step_prompt).trim() }
+          : {}),
+      })),
+    ]),
+  );
+}
+
+function blankStep() {
+  return {
+    type: 'key',
+    value: '',
+    key_description: '',
+    step_prompt: '',
+  };
+}
+
+function moveItem(list, index, delta) {
+  const target = index + delta;
+  if (index < 0 || index >= list.length || target < 0 || target >= list.length) return false;
+  [list[index], list[target]] = [list[target], list[index]];
+  return true;
+}
+
+function stepLabel(step) {
   return String(
-    target.step_prompt
-    || target.key_description
-    || target.text
-    || target.value
-    || target.key
-    || '当前区域',
+    step.step_prompt
+    || step.key_description
+    || step.value
+    || step.type
+    || '未维护步骤',
   ).trim();
 }
 
-function targetLocator(target = {}) {
-  const key = String(target.key || '').trim();
-  if (key) return `key=${key}`;
-  const text = String(target.text || '').trim();
-  if (text) return `text=${text}`;
-  const type = String(target.type || target.component_type || '').trim();
-  const value = target.value;
-  if (type || value !== undefined) return `${type || 'value'}=${String(value ?? '')}`;
-  return '未维护 locator';
-}
-
-function buildGroups(operations) {
-  const groups = [];
-  const sessions = new Map();
-  (operations || []).forEach((operation, index) => {
-    if (!operation || typeof operation !== 'object') return;
-    const session = specialSession(operation.effect);
-    if (session) {
-      let group = sessions.get(session.sessionId);
-      if (!group) {
-        group = {
-          key: `special:${session.sessionId}`,
-          kind: 'special_operate',
-          firstIndex: index,
-          steps: [],
-        };
-        sessions.set(session.sessionId, group);
-        groups.push(group);
-      }
-      group.steps.push({
-        operation,
-        order: session.stepIndex,
-      });
-      return;
-    }
-
-    const popupType = String(operation.popup_type || '').trim();
-    if (popupType || String(operation.effect || '') === 'open_popup') {
-      groups.push({
-        key: `popup:${operation.operation_id || index}`,
-        kind: 'popup',
-        popupType,
-        firstIndex: index,
-        steps: [{ operation, order: 1 }],
-      });
-    }
-  });
-
-  groups.sort((left, right) => left.firstIndex - right.firstIndex);
-  groups.forEach((group) => group.steps.sort((left, right) => left.order - right.order));
-  return groups;
-}
-
-async function executeDelete(pageName, operationId) {
-  const body = {
-    page_name: pageName,
-    operation_id: operationId,
-    delete_revealed_candidates: false,
-  };
-  const preview = await postJson('/api/delete_action', {
-    target_type: 'page_operation',
-    payload: body,
-    dry_run: true,
-  });
-  if (!preview?.preview_token) return false;
-  const result = await postJson('/api/delete_action', {
-    target_type: 'page_operation',
-    payload: body,
-    dry_run: false,
-    preview_token: preview.preview_token,
-  });
-  return Boolean(result?.ok);
-}
-
-async function deleteOperations(pageName, operationIds, description) {
-  const ids = [...new Set((operationIds || []).filter(Boolean))];
-  if (!ids.length) return;
-  if (!window.confirm(`确认删除${description}？\n将删除 ${ids.length} 个底层 page_operation。`)) return;
-  for (const operationId of ids) {
-    await executeDelete(pageName, operationId);
-  }
-  const status = document.getElementById('overlayStatus');
-  if (status) {
-    status.textContent = `已删除${description}，共 ${ids.length} 个步骤。`;
-    status.classList.remove('hidden');
-  }
-  scheduleRender(true);
-}
-
-function renderGroup(group, index) {
-  const operationIds = group.steps
-    .map(({ operation }) => String(operation.operation_id || '').trim())
-    .filter(Boolean)
-    .join(',');
-  const badge = group.kind === 'popup'
-    ? `popup${group.popupType ? ` · ${group.popupType}` : ''}`
-    : 'special_operate';
+function renderStep(step, operationIndex, stepIndex) {
   return `
-    <article class="dfsRecordCard specialMaintainCard" data-special-group="${escapeHtml(group.key)}">
+    <div class="operationRow specialStepEditor" data-special-step="${stepIndex}">
+      <div class="operationMain specialStepFields">
+        <strong>数组第 ${stepIndex + 1} 项 · ${escapeHtml(stepLabel(step))}</strong>
+        <div class="dfsAdvancedBody">
+          <label>
+            <span>type</span>
+            <input data-special-field="type" value="${escapeHtml(step.type || '')}" placeholder="key / text / Dialog ..." />
+          </label>
+          <label>
+            <span>value</span>
+            <input data-special-field="value" value="${escapeHtml(String(step.value ?? ''))}" placeholder="定位值" />
+          </label>
+          <label>
+            <span>key_description</span>
+            <input data-special-field="key_description" value="${escapeHtml(step.key_description || '')}" placeholder="操作说明" />
+          </label>
+          <label>
+            <span>step_prompt</span>
+            <input data-special-field="step_prompt" value="${escapeHtml(step.step_prompt || '')}" placeholder="执行提示" />
+          </label>
+        </div>
+      </div>
+      <div class="dfsEditorActions specialStepActions">
+        <button class="secondary compact" type="button" data-special-action="step-up" data-operation-index="${operationIndex}" data-step-index="${stepIndex}" ${stepIndex === 0 ? 'disabled' : ''}>上移</button>
+        <button class="secondary compact" type="button" data-special-action="step-down" data-operation-index="${operationIndex}" data-step-index="${stepIndex}" ${stepIndex === groups[operationIndex].length - 1 ? 'disabled' : ''}>下移</button>
+        <button class="danger compact" type="button" data-special-action="step-delete" data-operation-index="${operationIndex}" data-step-index="${stepIndex}">删除</button>
+      </div>
+    </div>`;
+}
+
+function renderOperation(steps, operationIndex) {
+  return `
+    <article class="dfsRecordCard specialMaintainCard" data-special-operation="${operationIndex}">
       <div class="dfsRecordHeading">
         <div>
-          <strong>operate${index + 1}</strong>
-          <span class="statusBadge ${group.kind === 'special_operate' ? 'isManual' : ''}">${escapeHtml(badge)}</span>
+          <strong>operation${operationIndex + 1}</strong>
+          <span class="statusBadge isManual">${steps.length} 项数组</span>
         </div>
-        <button class="danger compact" type="button" data-special-delete-group="${escapeHtml(operationIds)}">删除整组</button>
+        <div class="dfsEditorActions">
+          <button class="secondary compact" type="button" data-special-action="operation-up" data-operation-index="${operationIndex}" ${operationIndex === 0 ? 'disabled' : ''}>operation 上移</button>
+          <button class="secondary compact" type="button" data-special-action="operation-down" data-operation-index="${operationIndex}" ${operationIndex === groups.length - 1 ? 'disabled' : ''}>operation 下移</button>
+          <button class="danger compact" type="button" data-special-action="operation-delete" data-operation-index="${operationIndex}">删除 operation</button>
+        </div>
       </div>
-      <div class="muted">该组按当前页面内的实际录制顺序导出；special 多步会保持在同一个 operateN 内。</div>
+      <p class="muted">这一整个数组就是 <code>special_opearte.operation${operationIndex + 1}</code>；多步操作只是在数组里继续追加对象。</p>
       <div class="specialStepList">
-        ${group.steps.map(({ operation }, stepIndex) => `
-          <div class="operationRow specialStepRow">
-            <div class="operationMain">
-              <strong>step${stepIndex + 1} · ${escapeHtml(operation.operate || 'tap')} · ${escapeHtml(targetLabel(operation.target))}</strong>
-              <span>${escapeHtml(targetLocator(operation.target))}</span>
-              <code>${escapeHtml(operation.operation_id || '')}</code>
-            </div>
-            <button class="danger compact" type="button" data-special-delete-step="${escapeHtml(operation.operation_id || '')}">删除 step</button>
-          </div>
-        `).join('')}
+        ${steps.map((step, stepIndex) => renderStep(step, operationIndex, stepIndex)).join('')}
       </div>
+      <button class="secondary compact" type="button" data-special-action="step-add" data-operation-index="${operationIndex}">+ 向 operation${operationIndex + 1} 追加一步</button>
     </article>`;
+}
+
+function renderEditor(section) {
+  section.innerHTML = `
+    <summary>
+      <span>Special Operate 维护</span>
+      <small>${groups.length} 组</small>
+    </summary>
+    <div class="detailSectionBody">
+      <p class="muted">
+        持久化结构为 <code>special_opearte.operationN = [ {...}, {...} ]</code>。
+        operation 顺序就是执行顺序；一个 operation 内有几步，就在对应数组里放几个对象。
+        popup 仍放在这个序列里，例如 type 可直接维护为 Dialog / SheetWrapper / MenuWrapper。
+      </p>
+      <div class="dfsEditorActions">
+        <button class="secondary" type="button" data-special-action="operation-add">+ 新增 operation</button>
+        <button class="primary" type="button" data-special-action="save">保存 special_opearte</button>
+        <button class="secondary" type="button" data-special-action="reload">放弃未保存修改</button>
+      </div>
+      <div class="specialOperationList">
+        ${groups.length
+          ? groups.map(renderOperation).join('')
+          : '<div class="muted">当前页面没有 special_opearte。点击“新增 operation”可人工维护。</div>'}
+      </div>
+      <details class="dfsAdvanced">
+        <summary>查看当前结构 JSON</summary>
+        <pre class="graphBox">${escapeHtml(JSON.stringify({ special_opearte: groupsToStructure() }, null, 2))}</pre>
+      </details>
+    </div>`;
+}
+
+function updateFieldFromInput(input) {
+  const operationCard = input.closest('[data-special-operation]');
+  const stepRow = input.closest('[data-special-step]');
+  if (!operationCard || !stepRow) return;
+  const operationIndex = Number(operationCard.dataset.specialOperation);
+  const stepIndex = Number(stepRow.dataset.specialStep);
+  const field = input.dataset.specialField;
+  if (!groups[operationIndex]?.[stepIndex] || !field) return;
+  groups[operationIndex][stepIndex][field] = input.value;
+}
+
+async function saveCurrentStructure(pageName) {
+  const result = await postJson('/api/console_action', {
+    action: 'maintain_special_opearte',
+    payload: {
+      page_name: pageName,
+      special_opearte: groupsToStructure(),
+    },
+  });
+  if (!result?.ok) return;
+  groups = structureToGroups(result.special_opearte || {});
+  const status = document.getElementById('overlayStatus');
+  if (status) {
+    status.textContent = `${result.message} 已同步更新 DFS：${result.output_path}`;
+    status.classList.remove('hidden');
+  }
+  const section = document.querySelector('[data-special-maintenance]');
+  if (section) renderEditor(section);
+}
+
+async function loadStructure(pageName) {
+  const data = await api(`/api/page_detail?page_name=${encodeURIComponent(pageName)}`);
+  if (!data?.ok) return false;
+  editorPage = pageName;
+  groups = structureToGroups(
+    data.special_opearte
+    || data.dfs_record?.special_opearte
+    || {},
+  );
+  return true;
 }
 
 async function renderMaintenance(force = false) {
@@ -168,9 +217,10 @@ async function renderMaintenance(force = false) {
   if (!pageName) return;
 
   const generation = ++renderGeneration;
-  const data = await api(`/api/page_detail?page_name=${encodeURIComponent(pageName)}`);
-  if (generation !== renderGeneration || !data?.ok) return;
-  const groups = buildGroups(data.page_operations || []);
+  if (force || editorPage !== pageName) {
+    if (!await loadStructure(pageName)) return;
+  }
+  if (generation !== renderGeneration) return;
 
   internalMutation = true;
   try {
@@ -179,34 +229,54 @@ async function renderMaintenance(force = false) {
     section.className = 'detailSection';
     section.open = true;
     section.dataset.specialMaintenance = 'true';
-    section.innerHTML = `
-      <summary>
-        <span>Special / Popup 维护</span>
-        <small>${groups.length} 组</small>
-      </summary>
-      <div class="detailSectionBody">
-        <p class="muted">
-          这里显示最终 DFS <code>special.operate1 / operate2 / ...</code> 的顺序。
-          special 的同一采集 session 会聚合为一个 operateN，并按 step1 / step2 / ... 展示；popup 单独占一个 operateN。
-        </p>
-        ${groups.length
-          ? groups.map(renderGroup).join('')
-          : '<div class="muted">当前页面还没有 special_operate 或 popup 记录。</div>'}
-      </div>`;
+    renderEditor(section);
     box.appendChild(section);
 
+    section.oninput = (event) => {
+      const input = event.target.closest('[data-special-field]');
+      if (input) updateFieldFromInput(input);
+    };
+
     section.onclick = async (event) => {
-      const groupButton = event.target.closest('[data-special-delete-group]');
-      if (groupButton) {
-        const ids = String(groupButton.dataset.specialDeleteGroup || '').split(',').filter(Boolean);
-        await deleteOperations(pageName, ids, ` operate 组`);
+      const button = event.target.closest('button[data-special-action]');
+      if (!button) return;
+      const action = button.dataset.specialAction;
+      const operationIndex = Number(button.dataset.operationIndex);
+      const stepIndex = Number(button.dataset.stepIndex);
+
+      if (action === 'operation-add') {
+        groups.push([blankStep()]);
+      } else if (action === 'operation-up') {
+        moveItem(groups, operationIndex, -1);
+      } else if (action === 'operation-down') {
+        moveItem(groups, operationIndex, 1);
+      } else if (action === 'operation-delete') {
+        if (!window.confirm(`确认删除 operation${operationIndex + 1}？`)) return;
+        groups.splice(operationIndex, 1);
+      } else if (action === 'step-add') {
+        groups[operationIndex]?.push(blankStep());
+      } else if (action === 'step-up') {
+        moveItem(groups[operationIndex] || [], stepIndex, -1);
+      } else if (action === 'step-down') {
+        moveItem(groups[operationIndex] || [], stepIndex, 1);
+      } else if (action === 'step-delete') {
+        const operation = groups[operationIndex];
+        if (!operation) return;
+        if (operation.length === 1) {
+          if (!window.confirm('这是该 operation 的最后一步，删除后整个 operation 也会删除。继续？')) return;
+          groups.splice(operationIndex, 1);
+        } else {
+          operation.splice(stepIndex, 1);
+        }
+      } else if (action === 'reload') {
+        await loadStructure(pageName);
+      } else if (action === 'save') {
+        await saveCurrentStructure(pageName);
+        return;
+      } else {
         return;
       }
-      const stepButton = event.target.closest('[data-special-delete-step]');
-      if (stepButton) {
-        const id = String(stepButton.dataset.specialDeleteStep || '').trim();
-        await deleteOperations(pageName, [id], ` step ${id}`);
-      }
+      renderEditor(section);
     };
   } finally {
     internalMutation = false;
