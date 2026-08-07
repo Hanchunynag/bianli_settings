@@ -144,8 +144,8 @@ function renderOperation(items, operationIndex) {
 function renderEditor(section) {
   section.innerHTML = `
     <summary>
-      <span>Special Operate 数组维护</span>
-      <small>${operations.length} 个 operation</small>
+      <span>特殊操作 DFS</span>
+      <small>${operations.length} 个 operation · 数组顺序执行</small>
     </summary>
     <div class="detailSectionBody">
       <p class="muted">
@@ -245,11 +245,12 @@ async function mountEditor(force = false) {
   const pageName = currentDetailPage();
   if (!pageName) return;
 
+  const dfsEditor = box.querySelector('.dfsEditor');
+  if (!dfsEditor) return;
   const oldForm = box.querySelector('#specialManualForm');
-  if (!oldForm) return;
-  oldForm.hidden = true;
-  const oldDivider = oldForm.previousElementSibling;
-  if (oldDivider?.classList.contains('dfsEditorDivider')) oldDivider.hidden = true;
+  const oldDivider = oldForm?.previousElementSibling;
+  if (oldDivider?.classList.contains('dfsEditorDivider')) oldDivider.remove();
+  oldForm?.remove();
 
   const activeProfileId = store.activeSettingsProfileId || 'default';
   const existing = box.querySelector('[data-special-array-maintenance]');
@@ -276,7 +277,9 @@ async function mountEditor(force = false) {
   section.open = true;
   section.dataset.specialArrayMaintenance = 'true';
   renderEditor(section);
-  oldForm.insertAdjacentElement('afterend', section);
+  const branchDetail = box.querySelector('#dfsBranchDetail');
+  if (branchDetail) branchDetail.insertAdjacentElement('beforebegin', section);
+  else dfsEditor.appendChild(section);
 
   section.oninput = (event) => {
     const input = event.target.closest('[data-special-array-field]');
