@@ -41,7 +41,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install -q -r requirements.txt
+          python -m pip install -q -r requirements.txt httpx2
           python -m unittest discover -v
           python -m py_compile DFS.py web_nav_server.py settings_profiles.py
 
