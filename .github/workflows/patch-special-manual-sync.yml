@@ -1,0 +1,61 @@
+name: Patch special manual live sync
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'fix/special-manual-live-sync'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/special-manual-live-sync
+          fetch-depth: 0
+      - name: Patch backend special manual synchronization
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('web_nav_server.py')
+          s = p.read_text(encoding='utf-8')
+
+          s = s.replace(
+              '    format_path_target,\n    replace_navigation_target_locator,',
+              '    format_path_target,\n    format_special_step,\n    replace_navigation_target_locator,',
+              1,
+          )
+
+          marker = '''def cancel_special_capture(payload: Dict[str, Any]) -> Dict[str, Any]:\n'''
+          helper = '''def sync_recorded_special_into_manual(\n    state: Dict[str, Any],\n    operation: Dict[str, Any],\n) -> bool:\n    \"\"\"Keep an existing manual special DFS live while recording new steps.\"\"\"\n    manual = state.get(SPECIAL_MANUAL_FIELD)\n    if not isinstance(manual, dict):\n        return False\n\n    step = format_special_step(operation)\n    if not step:\n        return False\n\n    special = normalize_special(manual)\n    effect = str(operation.get(\"effect\") or \"\").strip()\n    parts = effect.split(\"::\")\n    step_index = 1\n    if (\n        len(parts) >= 3\n        and parts[0] == \"special_capture\"\n        and parts[2].startswith(\"step\")\n        and parts[2][4:].isdigit()\n    ):\n        step_index = int(parts[2][4:])\n\n    if step_index > 1 and special:\n        last_operation = next(reversed(special))\n        special[last_operation].append(step)\n    else:\n        special[f\"operation{len(special) + 1}\"] = [step]\n\n    state[SPECIAL_MANUAL_FIELD] = special\n    return True\n\n\n'''
+          if helper not in s:
+              s = s.replace(marker, helper + marker, 1)
+
+          old_cancel = '''    operations = state.get(\"special_operations\")\n    removed = 0\n    if isinstance(operations, list):\n        kept = []\n        for operation in operations:\n            if isinstance(operation, dict) and str(operation.get(\"effect\") or \"\").startswith(prefix):\n                removed += 1\n            else:\n                kept.append(operation)\n        state[\"special_operations\"] = kept\n    config.graphs.save(graph)\n'''
+          new_cancel = '''    operations = state.get(\"special_operations\")\n    removed = 0\n    removed_operations: List[Dict[str, Any]] = []\n    if isinstance(operations, list):\n        kept = []\n        for operation in operations:\n            if isinstance(operation, dict) and str(operation.get(\"effect\") or \"\").startswith(prefix):\n                removed += 1\n                removed_operations.append(operation)\n            else:\n                kept.append(operation)\n        state[\"special_operations\"] = kept\n\n    manual = state.get(SPECIAL_MANUAL_FIELD)\n    if isinstance(manual, dict) and removed_operations:\n        normalized_manual = normalize_special(manual)\n        recorded_group = [\n            step\n            for operation in removed_operations\n            if (step := format_special_step(operation))\n        ]\n        if normalized_manual and recorded_group:\n            last_operation = next(reversed(normalized_manual))\n            if normalized_manual.get(last_operation) == recorded_group:\n                normalized_manual.pop(last_operation, None)\n                state[SPECIAL_MANUAL_FIELD] = normalized_manual\n    config.graphs.save(graph)\n'''
+          if old_cancel not in s:
+              raise SystemExit('cancel_special_capture target block not found')
+          s = s.replace(old_cancel, new_cancel, 1)
+
+          old_save = '''    operations.append(operation)\n    upsert_clicked_target_as_candidate(graph, active_page, target, operation_id=operation_id)\n'''
+          new_save = '''    operations.append(operation)\n    if mode == \"special\":\n        sync_recorded_special_into_manual(state, operation)\n    upsert_clicked_target_as_candidate(graph, active_page, target, operation_id=operation_id)\n'''
+          if old_save not in s:
+              raise SystemExit('special operation append target block not found')
+          s = s.replace(old_save, new_save, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+          python -m py_compile web_nav_server.py DFS.py
+          rm -f .github/workflows/patch-special-manual-sync.yml
+          git config user.name "special-sync-bot"
+          git config user.email "special-sync-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "Keep manual special DFS synchronized while recording"
+          git push origin HEAD:fix/special-manual-live-sync
