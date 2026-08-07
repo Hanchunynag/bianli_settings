@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import re
 import shutil
 import time
 from pathlib import Path
@@ -60,6 +61,7 @@ from settings_ui_manual_recorder import (
 )
 from DFS import (
     DFS_MANUAL_FIELD,
+    build_special_operations,
     dfs_branch_for_page,
     dfs_record_display_name,
     dfs_record_for_page,
@@ -74,6 +76,8 @@ APP_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Settings Navigation Recorder")
 POPUP_TYPES = ("SheetWrapper", "Dialog", "MenuWrapper")
 POPUP_TYPE_SET = frozenset(POPUP_TYPES)
+SPECIAL_EFFECT_PREFIX = "special_capture::"
+SPECIAL_STEP_FIELDS = ("type", "value", "key_description", "step_prompt")
 
 
 class ServerConfig:
@@ -325,6 +329,153 @@ def create_manual_page(payload: Dict[str, Any]) -> Dict[str, Any]:
         ),
     )
     return {**current, "created_page": page_name, "recognition_profile": profile}
+
+
+def is_special_page_operation(operation: Any) -> bool:
+    if not isinstance(operation, dict):
+        return False
+    effect = str(operation.get("effect") or "").strip()
+    return bool(
+        effect.startswith(SPECIAL_EFFECT_PREFIX)
+        or effect == "open_popup"
+        or str(operation.get("popup_type") or "").strip()
+        or str(operation.get("operation_kind") or "").strip() == "special_operate"
+    )
+
+
+def normalize_special_step(step: Any, operation_index: int, step_index: int) -> Dict[str, Any]:
+    if not isinstance(step, dict):
+        raise ValueError(f"operation{operation_index} 第 {step_index} 步必须是对象")
+    step_type = str(step.get("type") or "").strip()
+    value = step.get("value")
+    if not step_type:
+        raise ValueError(f"operation{operation_index} 第 {step_index} 步 type 不能为空")
+    if value in (None, "", []):
+        raise ValueError(f"operation{operation_index} 第 {step_index} 步 value 不能为空")
+    normalized: Dict[str, Any] = {"type": step_type, "value": value}
+    for field in ("key_description", "step_prompt"):
+        text = str(step.get(field) or "").strip()
+        if text:
+            normalized[field] = text
+    if "key_description" not in normalized and "step_prompt" in normalized:
+        normalized["key_description"] = normalized["step_prompt"]
+    if "step_prompt" not in normalized and "key_description" in normalized:
+        normalized["step_prompt"] = normalized["key_description"]
+    return normalized
+
+
+def normalize_special_opearte(value: Any) -> List[List[Dict[str, Any]]]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, dict):
+        raise ValueError("special_opearte 必须是对象，例如 operation1: [...] ")
+    entries: List[tuple[int, str, Any]] = []
+    for key, steps in value.items():
+        match = re.fullmatch(r"operation(\d+)", str(key))
+        if not match:
+            raise ValueError(f"special_opearte 键名无效：{key}；必须使用 operation1、operation2 ...")
+        entries.append((int(match.group(1)), str(key), steps))
+    entries.sort(key=lambda item: item[0])
+    expected = list(range(1, len(entries) + 1))
+    actual = [item[0] for item in entries]
+    if actual != expected:
+        raise ValueError("special_opearte 必须从 operation1 开始连续编号")
+
+    groups: List[List[Dict[str, Any]]] = []
+    for operation_index, _, steps in entries:
+        if not isinstance(steps, list) or not steps:
+            raise ValueError(f"operation{operation_index} 必须是非空数组")
+        groups.append([
+            normalize_special_step(step, operation_index, step_index)
+            for step_index, step in enumerate(steps, start=1)
+        ])
+    return groups
+
+
+def maintain_special_opearte(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace one page's special/popup structure from a complete ordered payload."""
+    page_name = str(payload.get("page_name") or "").strip()
+    graph = config.graphs.load()
+    state = graph.get("states", {}).get(page_name)
+    if not isinstance(state, dict):
+        raise ValueError(f"页面不存在：{page_name}")
+
+    groups = normalize_special_opearte(payload.get("special_opearte") or {})
+    backup = config.graphs.backup()
+    existing_operations = state.get("page_operations")
+    if not isinstance(existing_operations, list):
+        existing_operations = []
+
+    managed_ids = {
+        str(item.get("operation_id") or "")
+        for item in existing_operations
+        if is_special_page_operation(item)
+    }
+    ordinary_operations = [
+        item for item in existing_operations
+        if not is_special_page_operation(item)
+    ]
+
+    # Remove candidates that were created only by a special/popup operation being replaced.
+    merged_candidates = state.get("merged_candidates")
+    if isinstance(merged_candidates, list) and managed_ids:
+        merged_candidates[:] = [
+            item for item in merged_candidates
+            if str(item.get("source_operation_id") or "") not in managed_ids
+            and str(item.get("requires_operation_id") or "") not in managed_ids
+        ]
+
+    max_index = 0
+    for item in ordinary_operations:
+        operation_id = str(item.get("operation_id") or "")
+        suffix = operation_id.removeprefix("operation")
+        if operation_id.startswith("operation") and suffix.isdigit():
+            max_index = max(max_index, int(suffix))
+
+    rebuilt: List[Dict[str, Any]] = []
+    stamp = str(int(time.time() * 1000))
+    for operation_index, steps in enumerate(groups, start=1):
+        session_id = f"manual_{stamp}_{operation_index}"
+        for step_index, step in enumerate(steps, start=1):
+            max_index += 1
+            operation_id = f"operation{max_index}"
+            step_type = str(step.get("type") or "")
+            is_popup = step_type in POPUP_TYPE_SET
+            operation: Dict[str, Any] = {
+                "operation_id": operation_id,
+                "created_at": now_iso(),
+                "operate": "tap",
+                "effect": (
+                    "open_popup"
+                    if is_popup
+                    else f"{SPECIAL_EFFECT_PREFIX}{session_id}::step{step_index}"
+                ),
+                "target": dict(step),
+            }
+            if is_popup:
+                operation["popup_type"] = step_type
+            else:
+                operation["operation_kind"] = "special_operate"
+            rebuilt.append(operation)
+
+    state["page_operations"] = [*ordinary_operations, *rebuilt]
+    config.graphs.save(graph)
+    compact_result = export_compact_dfs({"page_name": page_name})
+    refreshed_graph = config.graphs.load()
+    refreshed_state = refreshed_graph.get("states", {}).get(page_name, {})
+    special_opearte = build_special_operations(refreshed_state)
+    return {
+        "page_name": page_name,
+        "special_opearte": special_opearte,
+        "graph_backup": backup,
+        "output_path": compact_result["output_path"],
+        "record_count": compact_result["record_count"],
+        "message": (
+            f"已保存 {len(groups)} 组 special_opearte，并按 operation1 → operation{len(groups)} 的顺序持久化。"
+            if groups
+            else "已清空当前页面的 special_opearte。"
+        ),
+    }
 
 
 def ok_response(**kwargs: Any) -> JSONResponse:
@@ -971,6 +1122,8 @@ def api_console_action(req: ActionRequest) -> JSONResponse:
         )
     if action == "maintain_page_dfs":
         return ok_response(**maintain_page_dfs(payload))
+    if action == "maintain_special_opearte":
+        return ok_response(**maintain_special_opearte(payload))
     if action == "export_dfs_compact":
         return ok_response(**export_compact_dfs(payload))
     if action == "continue_current_page":
@@ -1142,7 +1295,7 @@ def api_page_detail(page_name: str) -> JSONResponse:
         "main_page_name": str(graph.get("main_page_name") or ""),
         "page_description": str(state.get("last_title") or state.get("page_description") or page_name),
         "path_snapshot": [],
-        "special": {},
+        "special_opearte": {},
     }
     return ok_response(
         page_name=page_name,
@@ -1154,6 +1307,7 @@ def api_page_detail(page_name: str) -> JSONResponse:
         page_operations=state.get("page_operations", []) or [],
         page_variants=state.get("page_variants", []) or [],
         continued_captures=state.get("continued_captures", []) or [],
+        special_opearte=build_special_operations(state),
         dfs_record=dfs_record,
         dfs_manual=state.get(DFS_MANUAL_FIELD),
     )
