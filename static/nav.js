@@ -368,10 +368,7 @@ el('screen').addEventListener('click', async (event) => {
   }
   if (specialCapture) {
     specialCapture.stepCount = nextSpecialStep;
-    store.data = data;
-    render(data);
-    refreshSpecialButtons();
-    renderSpecialHint();
+    renderFollowingActivePage(data);
     return;
   }
   renderFollowingActivePage(data);
