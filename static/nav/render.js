@@ -360,6 +360,7 @@ async function loadPageDetail(pageName) {
   };
   const dfsIsManual = Boolean(data.dfs_manual);
   const dfsIssue = String(data.dfs_issue || '').trim();
+  const dfsSeedFromParent = Boolean(data.dfs_seed_from_parent);
   const dfsStatusLabel = dfsIsManual ? '人工配置' : (dfsIssue ? '待维护' : '自动生成');
   const recordDisplayName = (record) => {
     const description = localDescription(record?.page_description);
@@ -438,6 +439,7 @@ async function loadPageDetail(pageName) {
       </summary>
       <div class="detailSectionBody">
         ${dfsIssue ? `<p class="muted"><strong>自动 DFS 未完成：</strong>${escapeHtml(dfsIssue)}</p>` : ''}
+        ${dfsIssue && dfsSeedFromParent ? '<p class="muted">下方 path_snapshot 已预填父页面有效路径；只需补当前页面最后一步，不会写入坐标定位。</p>' : ''}
         <section class="dfsEditor">
           <p class="muted">page_description 保存完整 DFS 路径描述，前端只显示最后一个页面名称；path_snapshot 保存实际点击步骤。menu_grid 等中间操作不会作为页面名称展示。</p>
           <form id="dfsManualForm">
@@ -464,6 +466,7 @@ async function loadPageDetail(pageName) {
             </label>
             <div class="dfsEditorActions">
               <button class="primary" type="submit">保存 DFS 数据</button>
+              ${dfsIssue ? '<button class="secondary" type="button" data-action="add-dfs-key-step">+ 新增 key 步骤</button><button class="secondary" type="button" data-action="add-dfs-text-step">+ 新增 text 步骤</button>' : ''}
               <button class="secondary" type="button" data-action="view-dfs">查看 DFS 分支</button>
               <button class="secondary" type="button" data-action="export-dfs">生成精简文件</button>
               ${dfsIsManual ? '<button class="secondary" type="button" data-action="reset-dfs">恢复自动生成</button>' : ''}
@@ -564,7 +567,29 @@ async function loadPageDetail(pageName) {
     const button = event.target.closest('button[data-action]');
     if (!button) return;
     const action = button.dataset.action;
-    if (action === 'rename') {
+    if (action === 'add-dfs-key-step' || action === 'add-dfs-text-step') {
+      const textarea = dfsForm.elements.path_snapshot;
+      let pathSnapshot;
+      try {
+        pathSnapshot = JSON.parse(textarea.value || '[]');
+        if (!Array.isArray(pathSnapshot)) throw new Error('必须是 JSON 数组');
+      } catch (error) {
+        el('error').textContent = `path_snapshot 格式错误：${error.message}`;
+        el('error').classList.remove('hidden');
+        return;
+      }
+      const locatorType = action === 'add-dfs-key-step' ? 'key' : 'text';
+      pathSnapshot.push({
+        type: locatorType,
+        value: '',
+        key_description: '',
+        step_prompt: '',
+      });
+      textarea.value = JSON.stringify(pathSnapshot, null, 2);
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+      el('error').classList.add('hidden');
+    } else if (action === 'rename') {
       renamePage(data);
     } else if (action === 'json') {
       const graphBox = el('graphBox');

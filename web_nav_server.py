@@ -1395,34 +1395,58 @@ def api_page_detail(page_name: str) -> JSONResponse:
     generated_dfs_record = dfs_record_for_page(graph, page_name)
     root_page = str(graph.get("traversal_config", {}).get("root_page") or "Pages_root")
     dfs_issue = ""
+    dfs_seed_from_parent = False
+    dfs_seed_parent = ""
+    dfs_seed_path: List[Dict[str, Any]] = []
     if generated_dfs_record is None and page_name != root_page:
         incoming = [
             item for item in transitions
             if isinstance(item, dict) and item.get("to_page") == page_name
         ]
+        incoming_parents = list(dict.fromkeys(
+            str(item.get("from_page") or "")
+            for item in incoming
+            if str(item.get("from_page") or "")
+        ))
+        if len(incoming_parents) == 1:
+            dfs_seed_parent = incoming_parents[0]
+            parent_record = dfs_record_for_page(graph, dfs_seed_parent)
+            if isinstance(parent_record, dict):
+                dfs_seed_path = [
+                    dict(item)
+                    for item in parent_record.get("path_snapshot") or []
+                    if isinstance(item, dict)
+                ]
+                dfs_seed_from_parent = True
+
         direct_invalid = [
             item for item in incoming
             if transition_dfs_targets(item) is None
         ]
-        if direct_invalid:
+        if direct_invalid and dfs_seed_from_parent:
+            dfs_issue = (
+                "当前页面已绑定父级，但最后一跳缺少可执行 key/text locator；"
+                "已带出父页面 DFS 前缀，请人工新增当前页最后一步并保存。"
+            )
+        elif direct_invalid:
             dfs_issue = (
                 "当前页面已绑定父级，但进入该页面的跳转缺少可执行 key/text locator；"
-                "自动 DFS 不会继承父页面路径，请人工维护缺失的最后一步。"
+                "请人工维护完整 DFS。"
             )
         elif incoming:
             dfs_issue = (
                 "当前页面存在进入跳转，但上游路径中有缺失的 key/text locator；"
-                "自动 DFS 暂不可达。"
+                "请从最近的有效路径开始人工维护。"
             )
         else:
-            dfs_issue = "当前页面没有从根页面可达的完整跳转路径，自动 DFS 暂不可用。"
+            dfs_issue = "当前页面没有从根页面可达的完整跳转路径，请人工维护 DFS。"
     dfs_record = generated_dfs_record or {
         "package_name": str(graph.get("package_name") or ""),
         "main_page_name": str(graph.get("main_page_name") or ""),
         "page_description": str(
             state.get("last_title") or state.get("page_description") or page_name
         ),
-        "path_snapshot": [],
+        "path_snapshot": dfs_seed_path,
     }
     return ok_response(
         page_name=page_name,
@@ -1448,6 +1472,8 @@ def api_page_detail(page_name: str) -> JSONResponse:
         dfs_record=dfs_record,
         dfs_manual=state.get(DFS_MANUAL_FIELD),
         dfs_issue=dfs_issue,
+        dfs_seed_from_parent=dfs_seed_from_parent,
+        dfs_seed_parent=dfs_seed_parent,
     )
 
 

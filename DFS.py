@@ -733,19 +733,23 @@ def export_dfs_paths(graph: Graph, root_page: str) -> tuple[List[Dict[str, Any]]
 
     visit(root_page, [], [])
 
+    # A manually maintained page is a valid DFS anchor.  Continue walking its
+    # descendants from the manual path instead of forcing every child below an
+    # unlocatable transition to be maintained by hand as well.
     for page_name, state in states.items():
         if page_name in visited or not isinstance(state, dict):
             continue
         manual = normalize_manual_dfs(state.get(DFS_MANUAL_FIELD))
         if not manual or not manual.get("path_snapshot"):
             continue
-        records.append({
-            "page_name": str(page_name),
-            **manual,
-            "special_opearte": build_special_operations(state),
-            "is_manual": True,
-        })
-        visited.add(str(page_name))
+        manual_description = str(
+            manual.get("page_description") or page_name
+        ).strip()
+        visit(
+            str(page_name),
+            [dict(target) for target in manual["path_snapshot"]],
+            [manual_description] if manual_description else [],
+        )
 
     return records, sorted(str(page) for page in states if page not in visited)
 
