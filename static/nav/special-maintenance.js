@@ -130,6 +130,7 @@ function renderOperation(items, operationIndex) {
         <div class="dfsEditorActions">
           <button class="secondary compact" type="button" data-special-array-action="operation-up" data-operation-index="${operationIndex}" ${operationIndex === 0 ? 'disabled' : ''}>operation 上移</button>
           <button class="secondary compact" type="button" data-special-array-action="operation-down" data-operation-index="${operationIndex}" ${operationIndex === operations.length - 1 ? 'disabled' : ''}>operation 下移</button>
+          <button class="secondary compact" type="button" data-special-array-action="operation-copy" data-operation-index="${operationIndex}">复制 operation</button>
           <button class="danger compact" type="button" data-special-array-action="operation-delete" data-operation-index="${operationIndex}">删除 operation</button>
         </div>
       </div>
@@ -299,6 +300,13 @@ async function mountEditor(force = false) {
       moveItem(operations, operationIndex, -1);
     } else if (action === 'operation-down') {
       moveItem(operations, operationIndex, 1);
+    } else if (action === 'operation-copy') {
+      const sourceItems = operations[operationIndex];
+      if (!Array.isArray(sourceItems) || !sourceItems.length) return;
+      operations.push(sourceItems.map(cloneItem));
+      await saveStructure(pageName);
+      renderEditor(section);
+      return;
     } else if (action === 'operation-delete') {
       if (!window.confirm(`确认删除 operation${operationIndex + 1}？删除后会立即保存。`)) return;
       operations.splice(operationIndex, 1);
