@@ -391,7 +391,7 @@ el('screen').addEventListener('click', async (event) => {
   const payload = popupType
     ? { ...point, popup_type: popupType }
     : special
-      ? { ...point, operate: 'tap', effect: specialEffect(special.id, nextSpecialStep) }
+      ? { ...point, page_name: special.pageName, operate: 'tap', effect: specialEffect(special.id, nextSpecialStep) }
       : { ...point, expect: 'new_page', effect: '' };
   let data = null;
   try {

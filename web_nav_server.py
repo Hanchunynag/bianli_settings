@@ -799,17 +799,28 @@ def record_page_operation(
     effect: str = "",
     manual_label: str = "",
     popup_type: str = "",
+    owner_page: str = "",
 ) -> Dict[str, Any]:
-    """统一录制页面内操作；popup 始终归属点击前的 active_page。"""
+    """统一录制页面内操作；popup/special 始终归属开始录制时的页面。"""
     if mode not in {"popup", "same_page", "gesture", "special"}:
         raise ValueError(f"未知页面内操作模式：{mode}")
 
     selected_popup_type = normalize_popup_type(popup_type) if mode == "popup" else ""
+    locked_special_page = str(owner_page or "").strip() if mode == "special" else ""
     before = capture_state_without_graph_write()
     graph = config.graphs.load()
-    stored_state = graph.get("states", {}).get(before["state"].get("page_name", ""))
-    active = {**stored_state, **before["state"]} if isinstance(stored_state, dict) else before["state"]
-    active_page = str(active.get("page_name") or before["state"].get("page_name") or "")
+    if mode == "special":
+        if not locked_special_page:
+            raise ValueError("special_operate 缺少开始录制时的 page_name，无法保证多步操作归属。")
+        stored_state = graph.get("states", {}).get(locked_special_page)
+        if not isinstance(stored_state, dict):
+            raise ValueError(f"special_operate 归属页面不存在：{locked_special_page}")
+        active = dict(stored_state)
+        active_page = locked_special_page
+    else:
+        stored_state = graph.get("states", {}).get(before["state"].get("page_name", ""))
+        active = {**stored_state, **before["state"]} if isinstance(stored_state, dict) else before["state"]
+        active_page = str(active.get("page_name") or before["state"].get("page_name") or "")
     if not active_page:
         raise ValueError("无法确定当前页面，不能保存页面操作。")
     if mode not in {"popup", "special"} and before["state"].get("page_name") != active_page:
@@ -845,8 +856,13 @@ def record_page_operation(
     )
 
     if target.get("needs_manual_label"):
+        locked_snapshot = (
+            {"root": before["root"], "state": active}
+            if mode == "special"
+            else before
+        )
         current = (
-            read_current_state(snapshot=before, graph=graph, active_page=active_page)
+            read_current_state(snapshot=locked_snapshot, graph=graph, active_page=active_page)
             if mode in {"popup", "special"}
             else read_current_state(capture=False)
         )
@@ -888,8 +904,15 @@ def record_page_operation(
     after_signature = hashlib.sha256(json.dumps(sorted(after_map), ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
     revealed = [item for key, item in after_map.items() if key not in before_map]
     hidden = [item for key, item in before_map.items() if key not in after_map]
-    state = graph.setdefault("states", {}).setdefault(active_page, before["state"])
-    state.update(before["state"])
+    if mode == "special":
+        # Dialog/Sheet/Menu JSON is interaction context only during a special session.
+        # Never let its detected title/page identity overwrite the owner page.
+        state = graph.setdefault("states", {}).get(active_page)
+        if not isinstance(state, dict):
+            raise ValueError(f"special_operate 归属页面不存在：{active_page}")
+    else:
+        state = graph.setdefault("states", {}).setdefault(active_page, before["state"])
+        state.update(before["state"])
     if mode in {"popup", "special"}:
         max_index = 0
         for operation_list in (
@@ -981,10 +1004,10 @@ def record_page_operation(
 
     if mode == "special":
         return read_current_state(
-            snapshot={"root": after["root"], "state": before["state"]},
+            snapshot={"root": after["root"], "state": dict(state)},
             graph=graph,
             active_page=active_page,
-            message="已记录 special_operate 当前步骤；继续点击可录制下一步。",
+            message="已记录 special_operate 当前步骤；当前弹窗/中间状态仅用于继续点击，不参与页面识别。",
         )
     if mode == "popup":
         message = (
@@ -1373,6 +1396,7 @@ def api_record_action(req: ActionRequest) -> JSONResponse:
             operate=str(payload.get("operate") or "tap"),
             effect=str(payload.get("effect") or "special_operate"),
             manual_label=label,
+            owner_page=str(payload.get("page_name") or ""),
         )
     return JSONResponse(data) if data.get("ok") is False else ok_response(**data)
 
