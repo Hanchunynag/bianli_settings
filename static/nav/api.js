@@ -24,6 +24,28 @@ function withSettingsProfile(path) {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+function withoutSpecialStepMarker(path, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  if (
+    method !== 'POST'
+    || !String(path).startsWith('/api/record_action')
+    || typeof options.body !== 'string'
+  ) {
+    return options;
+  }
+  try {
+    const body = JSON.parse(options.body);
+    if (body?.action !== 'special_tap') return options;
+    const effect = String(body?.payload?.effect || '').trim();
+    const matched = /^special_capture::([^:]+)(?:::step\d+)?$/.exec(effect);
+    if (!matched) return options;
+    body.payload.effect = `special_capture::${matched[1]}`;
+    return { ...options, body: JSON.stringify(body) };
+  } catch (_error) {
+    return options;
+  }
+}
+
 async function requestJson(path, options = {}, blocking = true) {
   if (blocking && store.busy) return null;
   const previouslyDisabledControls = new Set();
@@ -37,7 +59,10 @@ async function requestJson(path, options = {}, blocking = true) {
   }
   const errorBox = el('error');
   try {
-    const response = await fetch(withSettingsProfile(path), options);
+    const response = await fetch(
+      withSettingsProfile(path),
+      withoutSpecialStepMarker(path, options),
+    );
     const data = await response.json();
     if (!response.ok || data?.ok === false) {
       throw new Error(readableError(data, response));
