@@ -2,6 +2,7 @@ import { api, postJson } from './nav/api.js';
 import { el } from './nav/dom.js';
 import { store } from './nav/state.js';
 import { refreshOrphans, render, renderOverlay } from './nav/render.js?v=follow-active-page-12';
+import { initSpecialMaintenance } from './nav/special-maintenance.js';
 
 const popupTypeButtons = [...document.querySelectorAll('[data-popup-type]')];
 const popupTypes = new Set(popupTypeButtons.map((button) => button.dataset.popupType));
@@ -251,6 +252,7 @@ el('screen').addEventListener('click', async (event) => {
 });
 
 window.addEventListener('resize', renderOverlay);
+initSpecialMaintenance();
 api('/api/state').then((data) => {
   render(data);
   refreshSpecialButtons();
