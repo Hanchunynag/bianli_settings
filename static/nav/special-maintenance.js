@@ -300,8 +300,11 @@ async function mountEditor(force = false) {
     } else if (action === 'operation-down') {
       moveItem(operations, operationIndex, 1);
     } else if (action === 'operation-delete') {
-      if (!window.confirm(`确认删除 operation${operationIndex + 1}？`)) return;
+      if (!window.confirm(`确认删除 operation${operationIndex + 1}？删除后会立即保存。`)) return;
       operations.splice(operationIndex, 1);
+      await saveStructure(pageName);
+      renderEditor(section);
+      return;
     } else if (action === 'item-add') {
       operations[operationIndex]?.push(blankItem());
     } else if (action === 'item-up') {
@@ -312,11 +315,15 @@ async function mountEditor(force = false) {
       const items = operations[operationIndex];
       if (!items) return;
       if (items.length === 1) {
-        if (!window.confirm('这是该 operation 的最后一个数组项，删除后整个 operation 也会删除。继续？')) return;
+        if (!window.confirm('这是该 operation 的最后一个数组项，删除后整个 operation 也会立即保存。继续？')) return;
         operations.splice(operationIndex, 1);
       } else {
+        if (!window.confirm(`确认删除 operation${operationIndex + 1} 的数组第 ${itemIndex + 1} 项？删除后会立即保存。`)) return;
         items.splice(itemIndex, 1);
       }
+      await saveStructure(pageName);
+      renderEditor(section);
+      return;
     } else if (action === 'reload') {
       await loadStructure(pageName);
     } else if (action === 'save') {
