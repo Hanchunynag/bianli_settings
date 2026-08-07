@@ -985,7 +985,8 @@ def record_page_operation(
     operations.append(operation)
     if mode == "special":
         sync_recorded_special_into_manual(state, operation)
-    upsert_clicked_target_as_candidate(graph, active_page, target, operation_id=operation_id)
+    if mode != "special":
+        upsert_clicked_target_as_candidate(graph, active_page, target, operation_id=operation_id)
     if mode == "same_page":
         variant_payload = [
             str(state.get("page_name") or active_page),
