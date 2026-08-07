@@ -128,8 +128,33 @@
         <button class="primary" type="submit">创建并切换</button>
       </div>
     </form>
+    <form id="settingsProfileImportForm" class="settingsProfileForm">
+      <h3>导入已有 Graph</h3>
+      <p class="muted">选择之前采集保存的 settings_navigation_graph.json。导入后会成为独立 profile，不覆盖现有 Graph。</p>
+      <label>
+        <span>Graph JSON</span>
+        <input name="graph_file" type="file" accept=".json,application/json" required />
+      </label>
+      <label>
+        <span>配置名称（可选）</span>
+        <input name="name" placeholder="例如：历史 Mate X5 Graph" />
+      </label>
+      <div class="profileFormGrid">
+        <label>
+          <span>设置版本</span>
+          <input name="settings_version" placeholder="例如：HarmonyOS 5.0" required />
+        </label>
+        <label>
+          <span>机型</span>
+          <input name="device_model" placeholder="例如：Mate X5" required />
+        </label>
+      </div>
+      <div class="profileFormActions">
+        <button class="primary" type="submit">导入并切换</button>
+      </div>
+    </form>
   </dialog>
-  <script type="module" src="../static/nav.js?v=manual-dfs-seed-22"></script>
+  <script type="module" src="../static/nav.js?v=graph-import-24"></script>
   <script type="module" src="../static/nav/special-maintenance.js?v=special-delete-persist-23"></script>
 </body>
 </html>

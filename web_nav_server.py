@@ -62,6 +62,7 @@ from settings_ui_manual_recorder import (
 from settings_profiles import (
     DEFAULT_SETTINGS_PROFILE_ID,
     CreateSettingsProfileRequest,
+    ImportSettingsProfileRequest,
     SettingsProfileManager,
 )
 
@@ -1281,6 +1282,35 @@ def api_create_settings_profile(
         message=(
             f"已从 {profile.get('parent_profile_id')} 继承配置并创建"
             f"“{profile.get('name')}”。后续修改只写入该版本/机型配置。"
+        ),
+    )
+
+
+@app.post("/api/settings_profiles/import")
+def api_import_settings_profile(
+    req: ImportSettingsProfileRequest,
+) -> JSONResponse:
+    profile = config.settings_profiles.import_graph(
+        name=req.name,
+        settings_version=req.settings_version,
+        device_model=req.device_model,
+        source_filename=req.source_filename,
+        graph=req.graph,
+    )
+    profile_work_dir = config.settings_profiles.profile_work_dir(
+        profile["profile_id"]
+    )
+    compact = export_compact_dfs({}, work_dir=profile_work_dir)
+    imported_graph = NavigationGraphRepository(profile_work_dir).load()
+    return ok_response(
+        profile=profile,
+        page_count=len(imported_graph.get("states", {}) or {}),
+        transition_count=len(imported_graph.get("transitions", []) or []),
+        output_path=compact.get("output_path", ""),
+        message=(
+            f"已导入 Graph 并创建配置“{profile.get('name')}”："
+            f"{len(imported_graph.get('states', {}) or {})} 页面，"
+            f"{len(imported_graph.get('transitions', []) or [])} 跳转。"
         ),
     )
 
