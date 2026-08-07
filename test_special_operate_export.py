@@ -17,7 +17,7 @@ class SpecialOperateExportTest(unittest.TestCase):
                     "operation_id": "operation1",
                     "created_at": "2026-08-07T10:00:01",
                     "operate": "tap",
-                    "effect": "special_capture::abc",
+                    "effect": "special_capture::abc::step1",
                     "operation_kind": "special_operate",
                     "target": {
                         "key": "first",
@@ -29,7 +29,7 @@ class SpecialOperateExportTest(unittest.TestCase):
                     "operation_id": "operation2",
                     "created_at": "2026-08-07T10:00:02",
                     "operate": "tap",
-                    "effect": "special_capture::abc",
+                    "effect": "special_capture::abc::step2",
                     "operation_kind": "special_operate",
                     "target": {
                         "text": "第二个入口",
@@ -75,7 +75,7 @@ class SpecialOperateExportTest(unittest.TestCase):
         state = {
             "special_operations": [{
                 "created_at": "2026-08-07T10:00:01",
-                "effect": "special_capture::abc",
+                "effect": "special_capture::abc::step1",
                 "operation_kind": "special_operate",
                 "target": {"key": "auto"},
             }],
@@ -138,13 +138,11 @@ class SpecialOperateExportTest(unittest.TestCase):
 
     def test_frontend_maintains_operation_arrays_instead_of_numbered_step_keys(self):
         nav = Path("static/nav.js").read_text(encoding="utf-8")
-        api_js = Path("static/nav/api.js").read_text(encoding="utf-8")
         editor = Path("static/nav/special-array-maintenance.js").read_text(encoding="utf-8")
         template = Path("templates/nav.html").read_text(encoding="utf-8")
 
         self.assertIn("specialCapture", nav)
         self.assertIn("special_tap", nav)
-        self.assertIn("withoutSpecialStepMarker", api_js)
         self.assertIn("special_opearte.operation", editor)
         self.assertIn("数组第", editor)
         self.assertIn("追加一个数组项", editor)
